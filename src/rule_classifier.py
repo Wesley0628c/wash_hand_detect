@@ -96,57 +96,56 @@ class WashHandRuleClassifier:
             mean_curl = float(np.mean(left_angles[1:]) + np.mean(right_angles[1:])) / 2.0
 
             # 1. 腕 (Wrist): Grasping opposite wrist
-            if min_p_to_w < 1.15 and wrist_ratio < 0.80:
-                wrist_bonus = 4.5 * max(0.0, 1.0 - wrist_ratio / 0.80)
+            if min_p_to_w < 1.25 and wrist_ratio < 0.82:
+                wrist_bonus = 4.5 * max(0.0, 1.0 - wrist_ratio / 0.82)
                 scores["wrist"] += wrist_bonus
             # Negative evidence for Wrist: hands centered on palms/dorsum
-            if wrist_ratio > 0.88 or palm_dist < 0.55:
-                scores["wrist"] -= 3.0
+            if wrist_ratio > 0.90 or palm_dist < 0.50:
+                scores["wrist"] -= 2.5
 
-            # 2. 內 (Inside): Direct palm-to-palm facing, flat fingers
-            if palm_dist < 1.4 and mean_curl > 148.0 and min_p_to_w > 0.65 and palm_dot < 0.15:
-                # Direct palm-to-palm alignment
+            # 2. 內 (Inside): Direct palm-to-palm facing, relaxed/flat fingers
+            if palm_dist < 1.5 and mean_curl > 132.0 and min_p_to_w > 0.55 and palm_dot < 0.30:
                 scores["inside"] += 3.8
-            if mean_curl < 135.0 or wrist_ratio < 0.65:
-                scores["inside"] -= 2.5
+            if mean_curl < 125.0 or wrist_ratio < 0.60:
+                scores["inside"] -= 2.0
 
-            # 3. 外 (Outside): Palm on back of opposite hand, fingers extended
-            if palm_dist < 1.6 and mean_curl > 148.0 and wrist_ratio > 0.72 and min_p_to_w > 0.60:
-                scores["outside"] += 3.5
-            # Negative evidence for Outside: curled fingers or wrist grasp
-            if mean_curl < 138.0:
-                scores["outside"] -= 3.5
-            if wrist_ratio < 0.65:
+            # 3. 外 (Outside): Palm on back of opposite hand, natural extended fingers
+            if palm_dist < 1.7 and mean_curl > 125.0 and wrist_ratio > 0.70 and min_p_to_w > 0.50:
+                scores["outside"] += 3.8
+            # Negative evidence for Outside: tight curled fist or deep wrist grasp
+            if mean_curl < 120.0 and min_knuckles_to_p < 0.80:
                 scores["outside"] -= 3.0
+            if wrist_ratio < 0.60:
+                scores["outside"] -= 2.5
 
-            # 4. 弓 (Knuckles): PIP/DIP knuckles rubbing palm, fingers curled (< 152 deg)
-            if mean_curl < 152.0 and min_knuckles_to_p < 1.15 and palm_dist < 1.65:
-                curl_strength = max(0.0, (152.0 - mean_curl) / 30.0)
+            # 4. 弓 (Knuckles): PIP/DIP knuckles rubbing palm, fingers curled
+            if mean_curl < 155.0 and min_knuckles_to_p < 1.25 and palm_dist < 1.75:
+                curl_strength = max(0.0, (155.0 - mean_curl) / 35.0)
                 scores["knuckles"] += 4.2 * (0.5 + 0.5 * curl_strength)
             # Negative evidence for Knuckles: straight fingers
-            if mean_curl > 162.0:
-                scores["knuckles"] -= 4.0
-            if wrist_ratio < 0.65:
-                scores["knuckles"] -= 2.5
+            if mean_curl > 165.0:
+                scores["knuckles"] -= 3.5
+            if wrist_ratio < 0.60:
+                scores["knuckles"] -= 2.0
 
             # 5. 夾 (Interlace): Symmetric finger interleaving
-            if interlace_depth < 1.15 and palm_dist < 1.55 and mean_curl > 135.0:
-                scores["interlace"] += 3.8 * max(0.0, 1.0 - interlace_depth / 1.15)
-            if interlace_depth > 1.35:
+            if interlace_depth < 1.25 and palm_dist < 1.65 and mean_curl > 130.0:
+                scores["interlace"] += 3.8 * max(0.0, 1.0 - interlace_depth / 1.25)
+            if interlace_depth > 1.45:
                 scores["interlace"] -= 2.0
 
             # 6. 大 (Thumb): Grasping opposite thumb
-            if min_p_to_th < 1.10 and wrist_ratio > 0.68 and min_p_to_w > 0.60:
-                scores["thumb"] += 3.8 * max(0.0, 1.0 - min_p_to_th / 1.10)
-            if min_p_to_th > 1.40:
-                scores["thumb"] -= 2.5
+            if min_p_to_th < 1.20 and wrist_ratio > 0.65 and min_p_to_w > 0.50:
+                scores["thumb"] += 3.8 * max(0.0, 1.0 - min_p_to_th / 1.20)
+            if min_p_to_th > 1.50:
+                scores["thumb"] -= 2.0
 
             # 7. 立 (Fingertips): Bundled fingertips scrubbing palm
-            if min_t_to_p < 1.05 and fingertip_spread < 0.42 and min_p_to_w > 0.60:
-                scores["fingertips"] += 4.2 * max(0.0, 1.0 - min_t_to_p / 1.05)
-            # Negative evidence for Fingertips: spread fingers or near wrist
-            if fingertip_spread > 0.48 or min_p_to_w < 0.55:
-                scores["fingertips"] -= 3.5
+            if min_t_to_p < 1.15 and fingertip_spread < 0.48 and min_p_to_w > 0.50:
+                scores["fingertips"] += 4.2 * max(0.0, 1.0 - min_t_to_p / 1.15)
+            # Negative evidence for Fingertips: widely spread fingers or near wrist
+            if fingertip_spread > 0.55 or min_p_to_w < 0.50:
+                scores["fingertips"] -= 3.0
 
         # 2. Single-Hand / Merged Cluster Morphology Evidence (for foam/occlusion fallback)
         active_angles = features.get("active_angles", [0.0]*5)

@@ -110,21 +110,19 @@ class HandDetector:
             extracted_coords = []
             extracted_labels = []
 
+            max_dim = float(max(w, h))
             for hand_landmarks, handedness in zip(
                 results.multi_hand_landmarks, results.multi_handedness
             ):
                 label = handedness.classification[0].label  # "Left" or "Right"
                 coords = np.array(
-                    [[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark],
+                    [[lm.x * (w / max_dim), lm.y * (h / max_dim), lm.z * (w / max_dim)] for lm in hand_landmarks.landmark],
                     dtype=np.float32,
                 )
                 if is_roi:
-                    # Map coordinates from ROI back to full image normalized space [0, 1]
-                    coords[:, 0] = (coords[:, 0] * roi_w + xmin) / float(w)
-                    coords[:, 1] = (coords[:, 1] * roi_h + ymin) / float(h)
-                    for idx_lm, lm_obj in enumerate(hand_landmarks.landmark):
-                        lm_obj.x = float(coords[idx_lm, 0])
-                        lm_obj.y = float(coords[idx_lm, 1])
+                    # Map coordinates from ROI back to full image normalized space
+                    coords[:, 0] = (coords[:, 0] * roi_w + xmin) / max_dim
+                    coords[:, 1] = (coords[:, 1] * roi_h + ymin) / max_dim
 
                 extracted_coords.append(coords)
                 extracted_labels.append(label)

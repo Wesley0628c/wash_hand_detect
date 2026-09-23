@@ -24,13 +24,13 @@ VIDEO_SEGMENTS = {
     "wash_7steps_yt2.mp4": {
         "output_dir": "data/clips/video2_yt2",
         "segments": [
-            ("01_inside", 19.0, 23.0),
-            ("02_outside", 24.0, 27.0),
-            ("03_interlace", 28.0, 31.0),
-            ("04_knuckles", 32.0, 36.0),
-            ("05_thumb", 37.0, 41.0),
-            ("06_fingertips", 42.0, 46.0),
-            ("07_wrist", 47.0, 51.0),
+            ("01_inside", 19.5, 21.5),
+            ("02_outside", 24.5, 26.5),
+            ("03_interlace", 28.5, 30.5),
+            ("04_knuckles", 33.0, 35.0),
+            ("05_thumb", 38.0, 40.0),
+            ("06_fingertips", 43.0, 45.0),
+            ("07_wrist", 48.0, 50.0),
         ],
     },
 }
