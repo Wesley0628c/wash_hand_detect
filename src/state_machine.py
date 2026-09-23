@@ -52,6 +52,10 @@ class WashHandStateMachine:
         self.end_time: Optional[float] = None
         self.is_completed = False
 
+    def start(self):
+        """Start or reset the state machine for a session."""
+        self.reset()
+
     def reset(self):
         """Reset state machine for a new wash session."""
         self.current_step_idx = 0
@@ -96,7 +100,7 @@ class WashHandStateMachine:
             self.step_times[active_target] += dt
             self.grace_timer = 0.0
 
-            if self.step_timer >= self.step_duration:
+            if self.step_timer >= self.step_duration or (self.mode == "free" and self.step_times[active_target] >= self.step_duration):
                 self.completed_steps.add(active_target)
                 just_completed = True
                 completed_step_name = active_target

@@ -1,7 +1,7 @@
 """
 Rule-Based Wash Hand Classifier Module
 Implements domain-rule gesture classification for the 7 steps + 1 other class,
-along with real-time posture feedback generation.
+along with multi-class probability scoring and real-time posture feedback generation.
 """
 
 from typing import Dict, Any, Tuple, Optional
@@ -41,132 +41,122 @@ LABEL_SHORT_ZH = {
     "wrist": "腕",
 }
 
+FEEDBACK_ZH = {
+    "other": "未偵測到雙手或姿勢非洗手動作",
+    "inside": "姿勢正確：掌心對掌心搓洗",
+    "outside": "姿勢正確：掌心搓洗手背",
+    "interlace": "姿勢正確：十指交錯搓洗",
+    "knuckles": "姿勢正確：指背搓洗掌心",
+    "thumb": "姿勢正確：旋轉搓洗大拇指",
+    "fingertips": "姿勢正確：指尖搓洗掌心",
+    "wrist": "姿勢正確：正在旋轉搓洗手腕",
+}
+
 NAME_TO_LABEL = {v: k for k, v in LABELS.items()}
 
 
 class WashHandRuleClassifier:
-    """Rule-based evaluator for 7-step hand washing gestures."""
+    """Rule-based evaluator for 7-step hand washing gestures with multi-class probability distribution."""
 
     def __init__(self, min_motion_velocity: float = 0.005):
         self.min_motion_velocity = min_motion_velocity
+
+    def predict_probabilities(self, features: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Calculate continuous probability distribution across all 8 classes.
+        Returns a dictionary mapping class names to probabilities summing to 1.0.
+        """
+        has_left = features.get("has_left", False)
+        has_right = features.get("has_right", False)
+        both_hands = features.get("both_hands_detected", False)
+
+        if not (has_left or has_right):
+            probs = {k: 0.01 for k in LABELS.values()}
+            probs["other"] = 0.93
+            return probs
+
+        # Logit evidence scores
+        scores = {k: 0.1 for k in LABELS.values()}
+
+        # 1. Dual-Hand Geometric Evidence (when 2 hands are tracked)
+        if both_hands:
+            inter = features.get("inter_hand", {})
+            palm_dot = float(features.get("palm_normal_dot", 0.0))
+            palm_dist = float(inter.get("palm_center_dist", 99.0))
+            min_p_to_w = float(inter.get("min_palm_to_wrist", 99.0))
+            min_t_to_p = float(inter.get("min_tips_to_palm", 99.0))
+            min_p_to_th = float(inter.get("min_palm_to_thumb", 99.0))
+            interlace_depth = float(inter.get("interlace_depth", 99.0))
+
+            left_angles = features.get("left_angles", [0.0]*5)
+            right_angles = features.get("right_angles", [0.0]*5)
+            mean_curl = float(np.mean(left_angles[1:]) + np.mean(right_angles[1:])) / 2.0
+
+            # 1. 腕 (Wrist): palm is close to the other hand's wrist
+            if min_p_to_w < 1.3:
+                wrist_bonus = 4.5 * max(0.0, 1.0 - min_p_to_w / 1.3)
+                if min_p_to_w <= min_t_to_p + 0.1:
+                    wrist_bonus += 1.5
+                scores["wrist"] += wrist_bonus
+
+            # 2. 立 (Fingertips): fingertips close to palm, but palm NOT at wrist
+            if min_t_to_p < 1.1 and min_p_to_w > 0.6:
+                scores["fingertips"] += 3.5 * max(0.0, 1.0 - min_t_to_p / 1.1)
+
+            # 3. 大 (Thumb): palm grasping thumb
+            if min_p_to_th < 1.2:
+                scores["thumb"] += 3.2 * max(0.0, 1.0 - min_p_to_th / 1.2)
+
+            # 4. 弓 (Knuckles): fingers curled/hooked
+            if mean_curl < 166.0 and palm_dist < 1.8:
+                scores["knuckles"] += 3.8 * max(0.0, (166.0 - mean_curl) / 35.0)
+
+            # 5. 夾 (Interlace): finger bases interlaced
+            if interlace_depth < 1.2 and palm_dist < 1.6:
+                scores["interlace"] += 3.2 * max(0.0, 1.0 - interlace_depth / 1.2)
+
+            # 6. 外 (Outside): one hand on top of another
+            if palm_dist < 1.6 and mean_curl > 140.0 and min_p_to_w > 0.6:
+                scores["outside"] += 2.8
+
+            # 7. 內 (Inside): opposing palms ONLY when fingers are flat/extended
+            if palm_dot < -0.2 and palm_dist < 1.4 and min_p_to_w > 0.8 and min_t_to_p > 0.6 and mean_curl > 165.0:
+                scores["inside"] += 2.8
+
+        # 2. Single-Hand / Merged Cluster Morphology Evidence (for foam/occlusion)
+        active_angles = features.get("active_angles", [0.0]*5)
+        active_spread = float(features.get("active_spread", 0.0))
+        mean_4_angle = float(np.mean(active_angles[1:])) if len(active_angles) >= 5 else 180.0
+        thumb_angle = float(active_angles[0]) if len(active_angles) >= 1 else 180.0
+
+        if not both_hands:
+            if mean_4_angle < 135.0 and thumb_angle > 135.0:
+                scores["thumb"] += 3.0
+            elif active_spread < 0.30 or (mean_4_angle < 125.0 and active_spread < 0.35):
+                scores["fingertips"] += 3.0
+            elif mean_4_angle < 158.0:
+                scores["knuckles"] += 3.2
+            elif active_spread > 0.38 and mean_4_angle < 170.0:
+                scores["interlace"] += 2.8
+            elif thumb_angle < 140.0 and mean_4_angle > 145.0:
+                scores["outside"] += 2.7
+            elif mean_4_angle > 162.0:
+                scores["inside"] += 2.3
+
+        # Softmax normalization
+        exp_scores = np.exp(np.array(list(scores.values()), dtype=np.float32))
+        sum_exp = float(np.sum(exp_scores))
+        norm_probs = exp_scores / max(1e-6, sum_exp)
+
+        return {act: float(prob) for act, prob in zip(scores.keys(), norm_probs)}
 
     def predict(self, features: Dict[str, Any]) -> Tuple[str, float, str]:
         """
         Evaluate extracted features and return:
           (label_name, confidence, feedback_message)
         """
-        if not features.get("both_hands_detected", False):
-            if features.get("has_left", False) or features.get("has_right", False):
-                return "other", 0.9, "請將雙手皆放入鏡頭畫面中"
-            return "other", 1.0, "未偵測到雙手，請伸出雙手"
-
-        inter = features["inter_hand"]
-        wrist_dist = inter["wrist_dist"]
-        palm_center_dist = inter["palm_center_dist"]
-        palm_dot = features["palm_normal_dot"]
-        min_tips_to_palm = inter["min_tips_to_palm"]
-        min_palm_to_wrist = inter["min_palm_to_wrist"]
-        min_palm_to_thumb = inter["min_palm_to_thumb"]
-        interlace_depth = inter["interlace_depth"]
-
-        left_angles = features["left_angles"]
-        right_angles = features["right_angles"]
-        avg_angle = (np.mean(left_angles[1:]) + np.mean(right_angles[1:])) / 2.0  # 4 fingers
-        min_hand_angle = min(np.mean(left_angles[1:]), np.mean(right_angles[1:]))
-
-        # Check if hands are too far apart
-        if wrist_dist > 2.8 and palm_center_dist > 2.5:
-            return "other", 0.85, "雙手距離太遠，請將雙手靠近搓洗"
-
-        # 1. 腕 (Wrist): One palm center wraps/touches opposite wrist
-        if self._is_wrist(features):
-            return "wrist", 0.90, "姿勢正確：正在旋轉搓洗手腕"
-
-        # 2. 立 (Fingertips): Fingertips cluster pressed against opposite palm
-        if self._is_fingertips(features):
-            return "fingertips", 0.90, "姿勢正確：指尖搓洗掌心"
-
-        # 3. 大 (Thumb): One palm wrapping opposite thumb
-        if self._is_thumb(features):
-            return "thumb", 0.88, "姿勢正確：旋轉搓洗大拇指"
-
-        # 4. 弓 (Knuckles): Fingers clearly bent/curled, knuckles against opposite palm
-        if self._is_knuckles(features, min_hand_angle):
-            return "knuckles", 0.86, "姿勢正確：指背搓洗掌心"
-
-        # 5. 夾 (Interlace): Fingers interwoven, deep overlap, palms facing
-        if self._is_interlace(features):
-            return "interlace", 0.88, "姿勢正確：十指交錯搓洗"
-
-        # 6. 外 (Outside): One palm touching back of opposite hand (normals point same direction)
-        if self._is_outside(features):
-            return "outside", 0.87, "姿勢正確：掌心搓洗手背"
-
-        # 7. 內 (Inside): Palms facing each other and rubbing
-        if self._is_inside(features):
-            return "inside", 0.89, "姿勢正確：掌心對掌心搓洗"
-
-        return "other", 0.75, "動作調整中，請依步驟搓洗"
-
-    def _is_wrist(self, features: Dict[str, Any]) -> bool:
-        inter = features["inter_hand"]
-        # One palm is very close to opposite wrist, but palm centers are not touching
-        return (
-            inter["min_palm_to_wrist"] < 0.75
-            and inter["palm_center_dist"] > 0.6
-        )
-
-    def _is_fingertips(self, features: Dict[str, Any]) -> bool:
-        inter = features["inter_hand"]
-        # Fingertips of one hand touch opposite palm, while that hand's palm center is further
-        return (
-            inter["min_tips_to_palm"] < 0.65
-            and inter["palm_center_dist"] > 0.5
-        )
-
-    def _is_thumb(self, features: Dict[str, Any]) -> bool:
-        inter = features["inter_hand"]
-        # One palm close to opposite thumb tip, wrist distance not too close
-        return (
-            inter["min_palm_to_thumb"] < 0.70
-            and inter["min_tips_to_palm"] > 0.45
-            and inter["min_palm_to_wrist"] > 0.65
-        )
-
-    def _is_knuckles(self, features: Dict[str, Any], min_angle: float) -> bool:
-        inter = features["inter_hand"]
-        # Bent fingers (< 130 deg) and close palm distance
-        return (
-            min_angle < 135.0
-            and inter["palm_center_dist"] < 1.1
-            and inter["min_palm_to_wrist"] > 0.5
-        )
-
-    def _is_interlace(self, features: Dict[str, Any]) -> bool:
-        inter = features["inter_hand"]
-        palm_dot = features["palm_normal_dot"]
-        # Deep overlap between fingers, palms facing each other
-        return (
-            inter["interlace_depth"] < 0.85
-            and inter["palm_center_dist"] < 0.95
-            and palm_dot < 0.2
-        )
-
-    def _is_outside(self, features: Dict[str, Any]) -> bool:
-        inter = features["inter_hand"]
-        palm_dot = features["palm_normal_dot"]
-        # Normals pointing in similar direction (palm on dorsal surface)
-        return (
-            palm_dot > 0.05
-            and inter["palm_center_dist"] < 1.3
-        )
-
-    def _is_inside(self, features: Dict[str, Any]) -> bool:
-        inter = features["inter_hand"]
-        palm_dot = features["palm_normal_dot"]
-        # Palms facing each other, palms close
-        return (
-            palm_dot < 0.1
-            and inter["palm_center_dist"] < 1.3
-            and inter["wrist_dist"] < 1.8
-        )
+        probs = self.predict_probabilities(features)
+        top_action = max(probs, key=probs.get)
+        top_conf = probs[top_action]
+        feedback = FEEDBACK_ZH.get(top_action, "動作調整中，請依步驟搓洗")
+        return top_action, top_conf, feedback

@@ -249,6 +249,13 @@ def extract_hand_features(
         right_vel = float(np.mean(np.linalg.norm(right_norm - normalize_hand_landmarks(prev_right_hand)[0], axis=1)))
     avg_velocity = (left_vel + right_vel) / 2.0 if (has_left and has_right) else (left_vel or right_vel)
 
+    # 7. Single Hand / Merged Cluster Morphology (for when hands overlap under soap/occlusion)
+    active_hand = left_norm if has_left else (right_norm if has_right else None)
+    active_angles = left_angles if has_left else (right_angles if has_right else [0.0] * 5)
+    active_spread = 0.0
+    if active_hand is not None:
+        active_spread = float(np.mean([np.linalg.norm(active_hand[TIP_IDS[i]] - active_hand[TIP_IDS[i+1]]) for i in range(4)]))
+
     return {
         "has_left": has_left,
         "has_right": has_right,
@@ -262,6 +269,8 @@ def extract_hand_features(
         "palm_normal_dot": palm_normal_dot,
         "left_angles": left_angles,
         "right_angles": right_angles,
+        "active_angles": active_angles,
+        "active_spread": active_spread,
         "inter_hand": inter_hand_features,
         "velocity": avg_velocity,
     }

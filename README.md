@@ -24,6 +24,7 @@
 ```text
 wash_hand_detect/
 ├── README.md
+├── ARCHITECTURE.md                # 專案架構與判斷模式詳細說明
 ├── IMPLEMENTATION.md
 ├── requirements.txt
 │
@@ -82,6 +83,13 @@ python -m src.realtime --guide-mode sequence --step-duration 2.5
 - `M`：切換 教學模式 / 自由模式
 - `C`：切換 分類器 (Rule-based / LSTM)
 
+### 3. 離線影片測試與評估 (包含 1 秒最大機率時序積分器)
+
+```bash
+# 測試影片並輸出標註結果
+python -m src.test_video --video data/raw/wash_7steps_yt.mp4 --guide-mode free --window-sec 1.0 --output data/raw/annotated_yt.mp4
+```
+
 ---
 
 ## 📊 資料收集與 LSTM 模型訓練
@@ -112,5 +120,6 @@ python -m src.realtime --mode lstm --model-path models/wash_hand_lstm.keras
 ## 🧪 執行測試
 
 ```bash
-pytest tests/
+PYTHONPATH=. pytest tests/
 ```
+

@@ -173,3 +173,34 @@ def test_ui_hud_rendering():
 
     assert output.shape == (720, 1280, 3)
     assert output.dtype == np.uint8
+
+
+def test_temporal_probability_accumulator():
+    from src.accumulator import TemporalProbabilityAccumulator
+    acc = TemporalProbabilityAccumulator(window_sec=1.0, margin_threshold=0.10)
+
+    # 1. Feed 10 frames of 'outside' (high confidence)
+    for t in np.linspace(0.0, 0.5, 10):
+        probs = {k: 0.05 for k in LABELS.values()}
+        probs["outside"] = 0.65
+        label, conf, integrated = acc.update(probs, timestamp=t)
+
+    assert label == "outside"
+    assert conf > 0.5
+
+    # 2. Feed 2 noisy frames of 'inside' -> should stay locked on 'outside'
+    for t in [0.55, 0.60]:
+        probs = {k: 0.05 for k in LABELS.values()}
+        probs["inside"] = 0.65
+        label, conf, integrated = acc.update(probs, timestamp=t)
+
+    assert label == "outside"  # 1-sec integration successfully suppresses noise
+
+    # 3. Feed sustained frames of 'inside' past window -> should switch to 'inside'
+    for t in np.linspace(0.65, 1.8, 20):
+        probs = {k: 0.05 for k in LABELS.values()}
+        probs["inside"] = 0.80
+        label, conf, integrated = acc.update(probs, timestamp=t)
+
+    assert label == "inside"
+
