@@ -1,21 +1,24 @@
 # Wash Hand Detect — MediaPipe 七步洗手即時辨識系統
 
-本專案使用 **MediaPipe Hand Landmarker + OpenCV + 特徵萃取 + 規則分類器 (MVP) + LSTM 時序模型 + 洗手狀態機**，實現標準洗手七步（內、外、夾、弓、大、立、腕）之即時偵測、步驟引導與計時評估系統。
+本專案使用 **MediaPipe Hand Landmarker + OpenCV + 160維幾何特徵工程 + 15幀時序統計量 (960維) + XGBoost 姿勢分類器 + 洗手狀態機**，實現標準洗手七步（內、外、夾、弓、大、立、腕）之即時偵測、步驟引導、計時評估與視覺化展示系統。
+
+👉 詳細更新歷程與錯誤分析請參閱：[版本更新與修正記錄 (CHANGELOG.md)](./CHANGELOG.md)
 
 ---
 
 ## 🌟 系統特色
 
-1. **雙手骨架偵測**：使用 MediaPipe 擷取左右手各 21 個 3D 特徵點，嚴格對齊左右手順序並進行座標歸一化 (Wrist 歸零 + 手掌尺度縮放)。
-2. **多維特徵工程**：包含掌心中心 (Palm Center)、掌面法向量 (Palm Normal)、手指關節彎曲角度 (Finger Angles)、對應指尖距離與運動速度。
-3. **即時雙模分類**：
-   - **Rule-based Classifier (MVP)**：無需龐大訓練資料即可精準辨識與即時姿勢反饋。
-   - **LSTM / GRU 時序模型**：30 幀滑動窗口時序預測，依受試者 (Person ID) 分割資料預防 Data Leakage。
-4. **洗手狀態機 (State Machine)**：
+1. **雙手骨架偵測與時序追蹤**：使用 MediaPipe 擷取左右手各 21 個 3D 特徵點，透過上一幀歐氏距離匈牙利匹配防範交叉換位，並包含 4 幀殘影平滑補償。
+2. **多維幾何特徵工程**：包含 Wrist Ratio ($R_{wrist}$)、指節到掌心距離 (Knuckle-to-Palm)、對稱交錯深度 (Symmetric Interlace)、指尖聚攏度 (Fingertip Spread) 等 160 維判別特徵。
+3. **15 幀時序統計特徵 (960 維)**：在 15 幀滑動窗口內計算均值、標準差、極值與變化差值，捕獲動態洗手搓揉軌跡。
+4. **Landmark Dropout 泡沫資料增強**：隨機 20% 節點遮蔽與 20% 單手掉點模擬，使模型在肥皂泡沫與重疊遮擋下具備極高強健度。
+5. **雙模/混合分類器 (Hybrid Classifier)**：
+   - **XGBoost 姿勢分類器**：5-Fold 交叉驗證 Accuracy 達 94.0%，Macro F1 達 0.93。
+   - **幾何互斥約束 (Negative Evidence)**：徹底消除「外 vs 腕」、「弓 vs 外」之互相誤判。
+6. **洗手狀態機 (State Machine)**：
    - **教學模式 (Sequence Mode)**：強制依「內 → 外 → 夾 → 弓 → 大 → 立 → 腕」順序進行。
    - **自由模式 (Free Mode)**：任意順序搓洗，直至七步全數完成。
-   - 包含秒數達標計時、短暫飄移容錯與完成結算畫面。
-5. **現代化 UI / HUD**：支援繁體中文即時狀態、信心度進度條、七步清單與姿勢指導反饋。
+7. **現代化非遮擋 UI / HUD**：寬螢幕自動避讓洗手工作區，支援繁體中文即時狀態、信心度進度條與視覺化影片匯出。
 
 ---
 
@@ -24,32 +27,39 @@
 ```text
 wash_hand_detect/
 ├── README.md
-├── ARCHITECTURE.md                # 專案架構與判斷模式詳細說明
+├── CHANGELOG.md                   # 詳細版本更新、功能修正與錯誤診斷記錄
+├── ARCHITECTURE.md                # 系統架構與特徵定義詳細說明
 ├── IMPLEMENTATION.md
 ├── requirements.txt
 │
 ├── models/
-│   └── wash_hand_lstm.keras       # 訓練完成之 LSTM 模型權重
+│   ├── wash_hand_xgb.joblib       # 訓練完成之 XGBoost 分類器模型
+│   └── wash_hand_lstm.keras       # LSTM 時序模型
 │
 ├── data/
 │   ├── raw/
-│   ├── processed/                 # 依受試者存放之 .npy 30幀特徵檔案
-│   └── labels.csv                 # 錄製樣本索引清單
+│   │   ├── wash_7steps_yt.mp4     # 測試集一 (教育宣導雙畫面)
+│   │   └── wash_7steps_yt2.mp4    # 測試集二 (水槽俯拍實錄 1080p)
+│   ├── annotated_eval_yt.mp4      # 影片一視覺化評估匯出檔
+│   └── annotated_eval_yt2.mp4     # 影片二視覺化評估匯出檔
 │
 ├── src/
 │   ├── __init__.py
 │   ├── camera.py                  # 攝影機 / 測試影像來源封裝
-│   ├── hand_detector.py           # MediaPipe 雙手骨架擷取與繪製
-│   ├── features.py                # 幾何特徵計算與歸一化
-│   ├── rule_classifier.py         # 規則式分類器與姿勢指引
-│   ├── collect_data.py            # 互動式資料收集錄製工具
-│   ├── train.py                   # LSTM 時序模型訓練與評估 (F1/Confusion Matrix)
+│   ├── hand_detector.py           # MediaPipe 雙手骨架擷取、ROI 上採樣與時序追蹤
+│   ├── features.py                # 160 維幾何特徵計算與歸一化
+│   ├── temporal_features.py       # 15 幀時序統計量 (960 維) 與 Landmark Dropout 增強
+│   ├── rule_classifier.py         # 規則式分類器 (含 Negative Evidence 負向互斥)
+│   ├── ml_classifier.py           # XGBoost / Hybrid 機器學習分類器介面
+│   ├── train_ml.py                # XGBoost 模型訓練與 5-Fold 交叉驗證
+│   ├── evaluate_segments.py       # Ground Truth 段落評估與視覺化影片匯出工具
 │   ├── state_machine.py           # 洗手狀態轉移與持續時間計時
-│   ├── ui.py                      # 繁體中文 HUD 渲染與介面元件
+│   ├── ui.py                      # 繁體中文非遮擋 HUD 渲染
+│   ├── test_video.py              # 離線影片測試工具
 │   └── realtime.py                # 即時主程式 Pipeline
 │
 └── tests/
-    └── test_pipeline.py           # 單元與整合測試套件
+    └── test_pipeline.py           # 單元與整合測試套件 (10/10 綠燈)
 ```
 
 ---
@@ -63,61 +73,43 @@ wash_hand_detect/
 python3.11 -m venv venv
 source venv/bin/activate
 
-# 安裝相依套件
+# 安裝相依套件 (含 MediaPipe, OpenCV, XGBoost, LightGBM, Pillow)
 pip install -r requirements.txt
 ```
 
-### 2. 啟動即時洗手辨識 (預設 Rule-based 模式)
+### 2. 執行影片基準評估與視覺化影片匯出
 
 ```bash
-# 啟動即時辨識 (使用預設攝影機)
-python -m src.realtime
+# 評估影片 1 並產出帶 HUD 標註影片
+PYTHONPATH=. ./venv/bin/python src/evaluate_segments.py \
+  --video data/raw/wash_7steps_yt.mp4 \
+  --model-type hybrid \
+  --output data/annotated_eval_yt.mp4
 
-# 指定教學循序模式或自由模式
-python -m src.realtime --guide-mode sequence --step-duration 2.5
+# 評估影片 2 (水槽俯拍) 並產出帶 HUD 標註影片 (準確率 92%)
+PYTHONPATH=. ./venv/bin/python src/evaluate_segments.py \
+  --video data/raw/wash_7steps_yt2.mp4 \
+  --model-type hybrid \
+  --output data/annotated_eval_yt2.mp4
 ```
 
-**快捷鍵說明**：
-- `Q`：離開程式
-- `R`：重新開始洗手計時
-- `M`：切換 教學模式 / 自由模式
-- `C`：切換 分類器 (Rule-based / LSTM)
-
-### 3. 離線影片測試與評估 (包含 1 秒最大機率時序積分器)
+### 3. 重新訓練 XGBoost 姿勢分類器
 
 ```bash
-# 測試影片並輸出標註結果
-python -m src.test_video --video data/raw/wash_7steps_yt.mp4 --guide-mode free --window-sec 1.0 --output data/raw/annotated_yt.mp4
+# 啟動 4 倍 Landmark Dropout 增強並進行 5-Fold 交叉驗證
+PYTHONPATH=. ./venv/bin/python src/train_ml.py --aug 4 --output models/wash_hand_xgb.joblib
 ```
 
----
-
-## 📊 資料收集與 LSTM 模型訓練
-
-### 1. 錄製手勢資料
+### 4. 啟動即時 WebCam 辨識
 
 ```bash
-# 為受試者錄製特定手勢 (預設 10 clips，每 clip 30 幀)
-python -m src.collect_data --person person_01 --action inside
-python -m src.collect_data --person person_01 --action outside
-```
-
-### 2. 訓練 LSTM 模型
-
-```bash
-# 依 Person ID 自動切分 Train/Val/Test 並評估 Confusion Matrix 與 F1-score
-python -m src.train --epochs 30 --batch-size 16
-```
-
-### 3. 以 LSTM 模型運行即時辨識
-
-```bash
-python -m src.realtime --mode lstm --model-path models/wash_hand_lstm.keras
+# 啟動即時辨識 (使用 Hybrid XGBoost 分類器)
+python -m src.realtime --guide-mode free
 ```
 
 ---
 
-## 🧪 執行測試
+## 🧪 執行單元測試
 
 ```bash
 PYTHONPATH=. pytest tests/
