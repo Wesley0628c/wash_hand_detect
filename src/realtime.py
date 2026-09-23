@@ -16,49 +16,38 @@ from src.camera import Camera
 from src.hand_detector import HandDetector
 from src.features import extract_hand_features, feature_dict_to_vector
 from src.rule_classifier import WashHandRuleClassifier, LABELS, NAME_TO_LABEL, FEEDBACK_ZH
+from src.ml_classifier import WashHandMLClassifier
 from src.state_machine import WashHandStateMachine
 from src.accumulator import TemporalProbabilityAccumulator
 from src.ui import WashHandHUD
 
 
 class RealtimeWashHandDetector:
-    """Main Real-time Application Engine."""
+    """Main Real-time WebCam Application Engine."""
 
     def __init__(
         self,
-        mode: str = "rule",
-        model_path: str = "models/wash_hand_lstm.keras",
+        mode: str = "hybrid",
+        model_path: str = "models/wash_hand_xgb.joblib",
         guide_mode: str = "sequence",
-        step_duration: float = 2.5,
-        window_sec: float = 1.0,
-        confidence_thresh: float = 0.75,
+        step_duration: float = 2.0,
+        window_sec: float = 0.5,
         source: Any = 0,
+        flip_camera: bool = True,
     ):
         self.mode = mode
-        self.confidence_thresh = confidence_thresh
+        self.model_path = model_path
+        self.flip_camera = flip_camera
         self.camera = Camera(source=source)
-        self.detector = HandDetector(max_num_hands=2)
+        self.detector = HandDetector(max_num_hands=2, min_detection_confidence=0.5, min_tracking_confidence=0.5)
+
+        # Classifiers
+        self.ml_classifier = WashHandMLClassifier(model_path=model_path, hybrid_with_rules=(mode == "hybrid"))
         self.rule_classifier = WashHandRuleClassifier()
-        self.accumulator = TemporalProbabilityAccumulator(window_sec=window_sec, margin_threshold=0.10)
+
+        self.accumulator = TemporalProbabilityAccumulator(window_sec=window_sec, margin_threshold=0.15)
         self.state_machine = WashHandStateMachine(mode=guide_mode, step_duration=step_duration)
         self.hud = WashHandHUD()
-
-        self.seq_len = 30
-        self.feature_history = deque(maxlen=self.seq_len)
-
-        # Load LSTM model if requested and exists
-        self.lstm_model = None
-        if self.mode == "lstm":
-            if os.path.exists(model_path):
-                import tensorflow as tf
-                try:
-                    self.lstm_model = tf.keras.models.load_model(model_path)
-                    print(f"[+] Loaded LSTM model from: {model_path}")
-                except Exception as e:
-                    print(f"[!] Warning: Failed to load LSTM model ({e}). Falling back to rule-based.")
-                    self.mode = "rule"
-            else:
-                print(f"[!] Warning: Model file '{model_path}' not found. Defaulting to rule-based.")
 
         self.prev_left = None
         self.prev_right = None
@@ -66,17 +55,18 @@ class RealtimeWashHandDetector:
 
     def run(self):
         if not self.camera.open():
-            print(f"[Error] Could not open video source: {self.camera.source}")
+            print(f"[Error] 無法開啟攝影機 (Source: {self.camera.source})，請確認 WebCam 連接或權限。")
             return
 
         print("\n=======================================================")
-        print(" Wash Hand Real-time Detector Started!")
-        print(" Decision Strategy: 1.0s Max-Probability Integration")
-        print(" Controls:")
-        print("   [Q] Quit application")
-        print("   [R] Reset wash session")
-        print("   [M] Switch mode (Sequence / Free)")
-        print("   [C] Switch classifier (Rule-based / LSTM)")
+        print(" 🧼 七步洗手即時辨識系統 (WebCam 即時模式已啟動)")
+        print(f" 當前模型: {self.mode.upper()} | 決策窗口: {self.accumulator.window_sec}s")
+        print(" 鍵盤快捷鍵：")
+        print("   [Q] 離開程式 (Quit)")
+        print("   [R] 重置洗手進度 (Reset)")
+        print("   [M] 切換模式 (教學順序 Sequence / 自由 Free)")
+        print("   [C] 切換分類器 (Hybrid ↔ ML ↔ Rule-based)")
+        print("   [F] 水平翻轉攝影機畫面 (Flip Mirror)")
         print("=======================================================\n")
 
         self.state_machine.start()
@@ -90,43 +80,45 @@ class RealtimeWashHandDetector:
             dt = max(0.001, min(0.1, now - self.prev_timestamp))
             self.prev_timestamp = now
 
-            # Flip for mirror selfie perspective (if camera)
-            if isinstance(self.camera.source, int):
+            # Flip for mirror selfie perspective (if enabled)
+            if self.flip_camera:
                 frame = cv2.flip(frame, 1)
 
-            # 1. MediaPipe Hand Detection
+            # 1. MediaPipe Hand Detection with CLAHE & Temporal Tracking
             left_hand, right_hand, results = self.detector.process(frame)
-            canvas = self.detector.draw_hands(frame, results)
+            canvas = self.detector.draw_hands(frame.copy(), results)
 
             # 2. Feature Extraction
             features = extract_hand_features(
                 left_hand, right_hand, self.prev_left, self.prev_right
             )
-            feat_vec = feature_dict_to_vector(features)
             self.prev_left = left_hand
             self.prev_right = right_hand
-            self.feature_history.append(feat_vec)
 
             # 3. Action Probability Calculation
-            if self.mode == "lstm" and self.lstm_model is not None and len(self.feature_history) == self.seq_len:
-                seq_input = np.expand_dims(np.array(self.feature_history, dtype=np.float32), axis=0)
-                raw_probs = self.lstm_model.predict(seq_input, verbose=0)[0]
-                frame_probs = {LABELS.get(i, "other"): float(p) for i, p in enumerate(raw_probs)}
+            if self.mode == "hybrid":
+                self.ml_classifier.hybrid_with_rules = True
+                frame_probs = self.ml_classifier.predict_probabilities(features)
+                mode_display = f"{self.state_machine.mode.capitalize()} | HYBRID (XGB+Rule)"
+            elif self.mode == "ml":
+                self.ml_classifier.hybrid_with_rules = False
+                frame_probs = self.ml_classifier.predict_probabilities(features)
+                mode_display = f"{self.state_machine.mode.capitalize()} | ML (XGBoost)"
             else:
                 frame_probs = self.rule_classifier.predict_probabilities(features)
+                mode_display = f"{self.state_machine.mode.capitalize()} | RULE-BASED"
 
-            # 4. 1-Second Time-Windowed Winner-Take-All Probability Integration
-            decided_label, decided_conf, integrated_probs = self.accumulator.update(frame_probs, timestamp=now)
-            feedback_msg = FEEDBACK_ZH.get(decided_label, "動作調整中，請依步驟搓洗")
+            # 4. Temporal Winner-Take-All Probability Accumulation
+            decided_label, decided_conf, _ = self.accumulator.update(frame_probs, timestamp=now)
+            feedback_msg = FEEDBACK_ZH.get(decided_label, "請依七步口訣持續搓洗")
 
             # 5. State Machine Update
             just_completed, completed_step = self.state_machine.update(decided_label, dt)
             if just_completed and completed_step:
-                print(f"[🎉] Step Completed: {completed_step}")
+                print(f"[🎉] 恭喜！已完成步驟: {completed_step}")
 
             # 6. UI HUD Rendering
             progress = self.state_machine.get_progress_summary()
-            mode_display = f"Mode: {self.state_machine.mode.capitalize()} | {self.mode.upper()}"
             final_frame = self.hud.draw_hud(
                 canvas,
                 detected_label=decided_label,
@@ -146,20 +138,27 @@ class RealtimeWashHandDetector:
             elif key == ord("r"):
                 self.state_machine.reset()
                 self.accumulator.reset()
-                print("[*] Session reset.")
+                self.ml_classifier.reset()
+                print("[*] 洗手會話已重置 (Session Reset)。")
             elif key == ord("m"):
                 new_mode = "free" if self.state_machine.mode == "sequence" else "sequence"
                 self.state_machine.mode = new_mode
                 self.state_machine.reset()
                 self.accumulator.reset()
-                print(f"[*] Switched Guide Mode to: {new_mode}")
+                print(f"[*] 切換洗手導引模式為: {new_mode}")
             elif key == ord("c"):
-                if self.lstm_model is not None:
-                    self.mode = "lstm" if self.mode == "rule" else "rule"
-                    self.accumulator.reset()
-                    print(f"[*] Switched Classifier to: {self.mode}")
+                if self.mode == "hybrid":
+                    self.mode = "ml"
+                elif self.mode == "ml":
+                    self.mode = "rule"
                 else:
-                    print("[!] LSTM model is not loaded. Train a model first via `python -m src.train`.")
+                    self.mode = "hybrid"
+                self.accumulator.reset()
+                self.ml_classifier.reset()
+                print(f"[*] 切換分類器為: {self.mode.upper()}")
+            elif key == ord("f"):
+                self.flip_camera = not self.flip_camera
+                print(f"[*] 鏡像翻轉: {'開啟' if self.flip_camera else '關閉'}")
 
         self.camera.release()
         self.detector.close()
@@ -167,18 +166,18 @@ class RealtimeWashHandDetector:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Real-time Wash Hand Detection Application")
-    parser.add_argument("--mode", type=str, default="rule", choices=["rule", "lstm"], help="Classifier mode")
-    parser.add_argument("--model-path", type=str, default="models/wash_hand_lstm.keras", help="Path to LSTM model")
+    parser = argparse.ArgumentParser(description="Real-time Wash Hand Detection Application via WebCam")
+    parser.add_argument("--mode", type=str, default="hybrid", choices=["hybrid", "ml", "rule"], help="Classifier mode")
+    parser.add_argument("--model-path", type=str, default="models/wash_hand_xgb.joblib", help="Path to trained XGBoost model")
     parser.add_argument("--guide-mode", type=str, default="sequence", choices=["sequence", "free"], help="Guide flow mode")
-    parser.add_argument("--step-duration", type=float, default=2.5, help="Seconds required per step")
-    parser.add_argument("--window-sec", type=float, default=1.0, help="Sliding window seconds for probability integration")
-    parser.add_argument("--confidence-thresh", type=float, default=0.75, help="Confidence threshold for LSTM")
-    parser.add_argument("--source", default=0, help="Camera index, video path, or 'synthetic'")
+    parser.add_argument("--step-duration", type=float, default=2.0, help="Seconds required per step")
+    parser.add_argument("--window-sec", type=float, default=0.5, help="Sliding window seconds for probability integration")
+    parser.add_argument("--camera", default=0, help="WebCam index (0, 1, 2) or video file path")
+    parser.add_argument("--no-flip", action="store_true", help="Disable mirror horizontal flip")
     args = parser.parse_args()
 
-    # If source is digit string, convert to int
-    source_val = int(args.source) if str(args.source).isdigit() else args.source
+    # If camera is digit string, convert to int
+    source_val = int(args.camera) if str(args.camera).isdigit() else args.camera
 
     app = RealtimeWashHandDetector(
         mode=args.mode,
@@ -186,7 +185,7 @@ if __name__ == "__main__":
         guide_mode=args.guide_mode,
         step_duration=args.step_duration,
         window_sec=args.window_sec,
-        confidence_thresh=args.confidence_thresh,
         source=source_val,
+        flip_camera=not args.no_flip,
     )
     app.run()

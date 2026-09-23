@@ -9,6 +9,15 @@ import numpy as np
 import mediapipe as mp
 
 
+def _enhance_contrast_clahe(img_rgb: np.ndarray) -> np.ndarray:
+    """Apply adaptive histogram equalization on L-channel to highlight finger contours under soap foam."""
+    lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    cl = clahe.apply(l)
+    return cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2RGB)
+
+
 class HandDetector:
     """Detects and separates Left and Right hands using MediaPipe with temporal tracking & dropout compensation."""
 
@@ -49,7 +58,7 @@ class HandDetector:
         self, frame: np.ndarray
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Any]:
         """
-        Process a BGR OpenCV frame with adaptive ROI cropping and temporal ID tracking.
+        Process a BGR OpenCV frame with adaptive ROI cropping, CLAHE enhancement, and temporal ID tracking.
         Returns:
             left_hand: np.ndarray of shape (21, 3) or None
             right_hand: np.ndarray of shape (21, 3) or None
@@ -59,7 +68,6 @@ class HandDetector:
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         # 1. Decide if split-screen ROI is needed
-        # If aspect ratio is wide (e.g. split-screen educational video), crop right hand-wash area
         is_roi = False
         xmin, xmax, roi_w = 0, w, w
         ymin, ymax, roi_h = 0, h, h
@@ -77,10 +85,22 @@ class HandDetector:
             if results.multi_hand_landmarks and len(results.multi_hand_landmarks) > 0:
                 is_roi = True
             else:
-                # Fallback to full frame if ROI had no hands
-                results = self.hands.process(rgb_frame)
+                # Try CLAHE enhancement on ROI if dense foam obscured landmarks
+                roi_clahe = _enhance_contrast_clahe(roi_scaled)
+                results_clahe = self.hands.process(roi_clahe)
+                if results_clahe.multi_hand_landmarks and len(results_clahe.multi_hand_landmarks) > 0:
+                    results = results_clahe
+                    is_roi = True
+                else:
+                    results = self.hands.process(rgb_frame)
         else:
             results = self.hands.process(rgb_frame)
+            # CLAHE fallback for normal frame under heavy foam
+            if not results.multi_hand_landmarks or len(results.multi_hand_landmarks) == 0:
+                enhanced = _enhance_contrast_clahe(rgb_frame)
+                results_clahe = self.hands.process(enhanced)
+                if results_clahe.multi_hand_landmarks and len(results_clahe.multi_hand_landmarks) > 0:
+                    results = results_clahe
 
         curr_left_hand = None
         curr_right_hand = None

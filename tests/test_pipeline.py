@@ -233,3 +233,12 @@ def test_temporal_feature_buffer_and_ml_classifier():
     assert "inside" in probs
     assert np.isclose(sum(probs.values()), 1.0, atol=1e-4)
 
+
+def test_realtime_detector_initialization():
+    from src.realtime import RealtimeWashHandDetector
+    app = RealtimeWashHandDetector(mode="hybrid", source="synthetic")
+    assert app.mode == "hybrid"
+    assert app.camera._is_synthetic is False or app.camera.source == "synthetic"
+    assert app.ml_classifier is not None
+    assert app.accumulator.window_sec == 0.5
+

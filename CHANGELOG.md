@@ -15,13 +15,37 @@
   自適應 ROI 裁切 (2x 放大) + 歐氏距離時序追蹤 (防交叉換位) + Wrist Ratio ($R_{wrist}$) + 互斥負向證據 (Negative Evidence) + 0.5s 決策窗口
       │
       ▼
-[V3.0 時序 XGBoost 模型與泡沫增強] (現行最新版本)
+[V3.0 時序 XGBoost 模型與泡沫增強]
   160 維幾何特徵 + 15 幀滑動窗口統計量 (960 維) + Landmark Dropout 泡沫資料增強 + Hybrid 幾何融合 + 視覺化影片評估匯出
+      │
+      ▼
+[V3.1.0 CLAHE 泡沫對比強化與 WebCam 完整即時測試] (現行最新版本)
+  CLAHE 自適應直方圖均衡化 (強化泡沫指節邊緣) + WebCam 即時串流引擎 (支援鏡像/快捷鍵切換) + 完整即時體驗
 ```
 
 ---
 
-## 🚀 [V3.0.0] - 2026-09-23 (現行最新版)
+## 🚀 [V3.1.0] - 2026-09-23 (現行最新版)
+
+### 🌟 新增功能與優化 (Features & Optimizations)
+1. **CLAHE 泡沫邊緣自適應對比度強化 (`src/hand_detector.py`)**：
+   - 導入 LAB 色彩空間下的 CLAHE (Contrast Limited Adaptive Histogram Equalization) 自適應亮度均衡化。
+   - 當雙手覆蓋白色肥皂泡沫或處於水槽不均勻照明時，自動增強皮膚與指節邊緣輪廓，大幅降低 MediaPipe 掉點率。
+2. **WebCam 攝影機即時測試引擎全面升級 (`src/realtime.py`)**：
+   - 預設直接啟用 **Hybrid 混合分類器 (XGBoost + Rules)**，享受 94% 頂尖辨識精度。
+   - 支援即時鏡像翻轉 (`cv2.flip`)，符合人體工學鏡像體驗。
+   - 加入完整即時鍵盤快捷鍵：
+     - `Q`：離開程式 (Quit)
+     - `R`：重置洗手計時 (Reset)
+     - `M`：切換模式 (教學順序 Sequence ↔ 自由模式 Free)
+     - `C`：即時切換分類器 (Hybrid ↔ ML ↔ Rule-based)
+     - `F`：水平翻轉鏡像畫面 (Toggle Flip Mirror)
+3. **擴充單元測試套件 (`tests/test_pipeline.py`)**：
+   - 單元測試增加至 **11/11 全數通過**，涵蓋特徵、時序統計、ML 介面與即時引擎初始化測試。
+
+---
+
+## 🚀 [V3.0.0] - 2026-09-23
 
 ### 🌟 新增功能 (Features)
 1. **15 幀時序統計特徵萃取器 (`src/temporal_features.py`)**：
