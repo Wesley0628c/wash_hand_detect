@@ -22,18 +22,18 @@ from src.ui import WashHandHUD
 # Ground Truth Segment Definitions
 BENCHMARK_GROUND_TRUTH = {
     "wash_7steps_yt.mp4": [
-        (0.0, 4.0, "other"),
-        (4.0, 10.0, "inside"),
-        (10.0, 16.0, "outside"),
-        (16.0, 21.0, "interlace"),
-        (21.0, 27.0, "knuckles"),
-        (27.0, 33.0, "thumb"),
-        (33.0, 39.0, "fingertips"),
-        (39.0, 46.0, "wrist"),
-        (46.0, 51.0, "other"),
+        (0.0, 4.3, "other"),
+        (4.3, 8.3, "inside"),
+        (8.3, 13.5, "outside"),
+        (13.5, 19.0, "interlace"),
+        (19.0, 24.4, "knuckles"),
+        (24.4, 30.7, "thumb"),
+        (30.7, 34.4, "fingertips"),
+        (34.4, 39.2, "wrist"),
+        (39.2, 50.8, "other"),
     ],
     "wash_7steps_yt2.mp4": [
-        (0.0, 18.0, "other"),
+        (0.0, 19.0, "other"),
         (19.0, 23.0, "inside"),
         (24.0, 27.0, "outside"),
         (28.0, 31.0, "interlace"),
