@@ -78,52 +78,77 @@ class WashHandRuleClassifier:
         # Logit evidence scores
         scores = {k: 0.1 for k in LABELS.values()}
 
-        # 1. Dual-Hand Geometric Evidence (when 2 hands are tracked)
+        # 1. Dual-Hand Geometric Evidence with Negative Evidence & Mutual Exclusion
         if both_hands:
             inter = features.get("inter_hand", {})
             palm_dot = float(features.get("palm_normal_dot", 0.0))
             palm_dist = float(inter.get("palm_center_dist", 99.0))
             min_p_to_w = float(inter.get("min_palm_to_wrist", 99.0))
+            wrist_ratio = float(inter.get("wrist_ratio", 99.0))
             min_t_to_p = float(inter.get("min_tips_to_palm", 99.0))
+            min_knuckles_to_p = float(inter.get("min_knuckles_to_palm", 99.0))
             min_p_to_th = float(inter.get("min_palm_to_thumb", 99.0))
             interlace_depth = float(inter.get("interlace_depth", 99.0))
+            fingertip_spread = float(inter.get("min_fingertip_spread", 99.0))
 
             left_angles = features.get("left_angles", [0.0]*5)
             right_angles = features.get("right_angles", [0.0]*5)
             mean_curl = float(np.mean(left_angles[1:]) + np.mean(right_angles[1:])) / 2.0
 
-            # 1. 腕 (Wrist): palm is close to the other hand's wrist
-            if min_p_to_w < 1.3:
-                wrist_bonus = 4.5 * max(0.0, 1.0 - min_p_to_w / 1.3)
-                if min_p_to_w <= min_t_to_p + 0.1:
-                    wrist_bonus += 1.5
+            # 1. 腕 (Wrist): Grasping opposite wrist
+            if min_p_to_w < 1.15 and wrist_ratio < 0.80:
+                wrist_bonus = 4.5 * max(0.0, 1.0 - wrist_ratio / 0.80)
                 scores["wrist"] += wrist_bonus
+            # Negative evidence for Wrist: hands centered on palms/dorsum
+            if wrist_ratio > 0.88 or palm_dist < 0.55:
+                scores["wrist"] -= 3.0
 
-            # 2. 立 (Fingertips): fingertips close to palm, but palm NOT at wrist
-            if min_t_to_p < 1.1 and min_p_to_w > 0.6:
-                scores["fingertips"] += 3.5 * max(0.0, 1.0 - min_t_to_p / 1.1)
+            # 2. 內 (Inside): Direct palm-to-palm facing, flat fingers
+            if palm_dist < 1.4 and mean_curl > 148.0 and min_p_to_w > 0.65 and palm_dot < 0.15:
+                # Direct palm-to-palm alignment
+                scores["inside"] += 3.8
+            if mean_curl < 135.0 or wrist_ratio < 0.65:
+                scores["inside"] -= 2.5
 
-            # 3. 大 (Thumb): palm grasping thumb
-            if min_p_to_th < 1.2:
-                scores["thumb"] += 3.2 * max(0.0, 1.0 - min_p_to_th / 1.2)
+            # 3. 外 (Outside): Palm on back of opposite hand, fingers extended
+            if palm_dist < 1.6 and mean_curl > 148.0 and wrist_ratio > 0.72 and min_p_to_w > 0.60:
+                scores["outside"] += 3.5
+            # Negative evidence for Outside: curled fingers or wrist grasp
+            if mean_curl < 138.0:
+                scores["outside"] -= 3.5
+            if wrist_ratio < 0.65:
+                scores["outside"] -= 3.0
 
-            # 4. 弓 (Knuckles): fingers curled/hooked
-            if mean_curl < 166.0 and palm_dist < 1.8:
-                scores["knuckles"] += 3.8 * max(0.0, (166.0 - mean_curl) / 35.0)
+            # 4. 弓 (Knuckles): PIP/DIP knuckles rubbing palm, fingers curled (< 152 deg)
+            if mean_curl < 152.0 and min_knuckles_to_p < 1.15 and palm_dist < 1.65:
+                curl_strength = max(0.0, (152.0 - mean_curl) / 30.0)
+                scores["knuckles"] += 4.2 * (0.5 + 0.5 * curl_strength)
+            # Negative evidence for Knuckles: straight fingers
+            if mean_curl > 162.0:
+                scores["knuckles"] -= 4.0
+            if wrist_ratio < 0.65:
+                scores["knuckles"] -= 2.5
 
-            # 5. 夾 (Interlace): finger bases interlaced
-            if interlace_depth < 1.2 and palm_dist < 1.6:
-                scores["interlace"] += 3.2 * max(0.0, 1.0 - interlace_depth / 1.2)
+            # 5. 夾 (Interlace): Symmetric finger interleaving
+            if interlace_depth < 1.15 and palm_dist < 1.55 and mean_curl > 135.0:
+                scores["interlace"] += 3.8 * max(0.0, 1.0 - interlace_depth / 1.15)
+            if interlace_depth > 1.35:
+                scores["interlace"] -= 2.0
 
-            # 6. 外 (Outside): one hand on top of another
-            if palm_dist < 1.6 and mean_curl > 140.0 and min_p_to_w > 0.6:
-                scores["outside"] += 2.8
+            # 6. 大 (Thumb): Grasping opposite thumb
+            if min_p_to_th < 1.10 and wrist_ratio > 0.68 and min_p_to_w > 0.60:
+                scores["thumb"] += 3.8 * max(0.0, 1.0 - min_p_to_th / 1.10)
+            if min_p_to_th > 1.40:
+                scores["thumb"] -= 2.5
 
-            # 7. 內 (Inside): opposing palms ONLY when fingers are flat/extended
-            if palm_dot < -0.2 and palm_dist < 1.4 and min_p_to_w > 0.8 and min_t_to_p > 0.6 and mean_curl > 165.0:
-                scores["inside"] += 2.8
+            # 7. 立 (Fingertips): Bundled fingertips scrubbing palm
+            if min_t_to_p < 1.05 and fingertip_spread < 0.42 and min_p_to_w > 0.60:
+                scores["fingertips"] += 4.2 * max(0.0, 1.0 - min_t_to_p / 1.05)
+            # Negative evidence for Fingertips: spread fingers or near wrist
+            if fingertip_spread > 0.48 or min_p_to_w < 0.55:
+                scores["fingertips"] -= 3.5
 
-        # 2. Single-Hand / Merged Cluster Morphology Evidence (for foam/occlusion)
+        # 2. Single-Hand / Merged Cluster Morphology Evidence (for foam/occlusion fallback)
         active_angles = features.get("active_angles", [0.0]*5)
         active_spread = float(features.get("active_spread", 0.0))
         mean_4_angle = float(np.mean(active_angles[1:])) if len(active_angles) >= 5 else 180.0
@@ -134,7 +159,7 @@ class WashHandRuleClassifier:
                 scores["thumb"] += 3.0
             elif active_spread < 0.30 or (mean_4_angle < 125.0 and active_spread < 0.35):
                 scores["fingertips"] += 3.0
-            elif mean_4_angle < 158.0:
+            elif mean_4_angle < 152.0:
                 scores["knuckles"] += 3.2
             elif active_spread > 0.38 and mean_4_angle < 170.0:
                 scores["interlace"] += 2.8
@@ -143,8 +168,10 @@ class WashHandRuleClassifier:
             elif mean_4_angle > 162.0:
                 scores["inside"] += 2.3
 
-        # Softmax normalization
-        exp_scores = np.exp(np.array(list(scores.values()), dtype=np.float32))
+        # Softmax normalization with stability clipping
+        score_arr = np.array(list(scores.values()), dtype=np.float32)
+        score_arr = np.clip(score_arr, -10.0, 15.0)
+        exp_scores = np.exp(score_arr - np.max(score_arr))
         sum_exp = float(np.sum(exp_scores))
         norm_probs = exp_scores / max(1e-6, sum_exp)
 

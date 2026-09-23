@@ -190,6 +190,18 @@ def extract_hand_features(
         # Palm to opposite wrist distances
         left_palm_to_right_wrist = euclidean_distance(left_palm_center, right_hand[WRIST]) / avg_scale
         right_palm_to_left_wrist = euclidean_distance(right_palm_center, left_hand[WRIST]) / avg_scale
+        min_p_to_w = min(left_palm_to_right_wrist, right_palm_to_left_wrist)
+        wrist_ratio = min_p_to_w / (palm_center_dist + 1e-6)
+
+        # Knuckle (PIP joints) to opposite palm center distances (for Knuckles / 弓)
+        pip_ids = [INDEX_PIP, MIDDLE_PIP, RING_PIP, PINKY_PIP]
+        left_knuckles_to_right_palm = float(np.mean([
+            euclidean_distance(left_hand[pid], right_palm_center) for pid in pip_ids
+        ])) / avg_scale
+        right_knuckles_to_left_palm = float(np.mean([
+            euclidean_distance(right_hand[pid], left_palm_center) for pid in pip_ids
+        ])) / avg_scale
+        min_knuckles_to_palm = min(left_knuckles_to_right_palm, right_knuckles_to_left_palm)
 
         # Palm to opposite thumb distances
         left_palm_to_right_thumb = euclidean_distance(left_palm_center, right_hand[THUMB_TIP]) / avg_scale
@@ -200,13 +212,35 @@ def extract_hand_features(
             euclidean_distance(left_hand[tid], right_hand[tid]) / avg_scale for tid in TIP_IDS
         ]
 
-        # Finger overlap / interlace metric (distance from left tips to right finger bases)
-        left_tips_to_right_mcps = np.mean([
+        # Symmetric Finger overlap / interlace metric (for Interlace / 夾)
+        left_to_right_interlace = float(np.mean([
             euclidean_distance(left_hand[INDEX_TIP], right_hand[INDEX_MCP]),
             euclidean_distance(left_hand[MIDDLE_TIP], right_hand[MIDDLE_MCP]),
             euclidean_distance(left_hand[RING_TIP], right_hand[RING_MCP]),
             euclidean_distance(left_hand[PINKY_TIP], right_hand[PINKY_MCP]),
-        ]) / avg_scale
+        ])) / avg_scale
+
+        right_to_left_interlace = float(np.mean([
+            euclidean_distance(right_hand[INDEX_TIP], left_hand[INDEX_MCP]),
+            euclidean_distance(right_hand[MIDDLE_TIP], left_hand[MIDDLE_MCP]),
+            euclidean_distance(right_hand[RING_TIP], left_hand[RING_MCP]),
+            euclidean_distance(right_hand[PINKY_TIP], left_hand[PINKY_MCP]),
+        ])) / avg_scale
+
+        interlace_depth = min(left_to_right_interlace, right_to_left_interlace)
+
+        # Fingertip spread (cluster compactness for Fingertips / 立)
+        left_spread = float(np.mean([
+            euclidean_distance(left_hand[INDEX_TIP], left_hand[MIDDLE_TIP]),
+            euclidean_distance(left_hand[MIDDLE_TIP], left_hand[RING_TIP]),
+            euclidean_distance(left_hand[RING_TIP], left_hand[PINKY_TIP]),
+        ])) / avg_scale
+        right_spread = float(np.mean([
+            euclidean_distance(right_hand[INDEX_TIP], right_hand[MIDDLE_TIP]),
+            euclidean_distance(right_hand[MIDDLE_TIP], right_hand[RING_TIP]),
+            euclidean_distance(right_hand[RING_TIP], right_hand[PINKY_TIP]),
+        ])) / avg_scale
+        min_fingertip_spread = min(left_spread, right_spread)
 
         inter_hand_features = {
             "wrist_dist": wrist_dist,
@@ -216,12 +250,17 @@ def extract_hand_features(
             "min_tips_to_palm": min(left_tips_to_right_palm, right_tips_to_left_palm),
             "left_palm_to_right_wrist": left_palm_to_right_wrist,
             "right_palm_to_left_wrist": right_palm_to_left_wrist,
-            "min_palm_to_wrist": min(left_palm_to_right_wrist, right_palm_to_left_wrist),
+            "min_palm_to_wrist": min_p_to_w,
+            "wrist_ratio": wrist_ratio,
+            "left_knuckles_to_right_palm": left_knuckles_to_right_palm,
+            "right_knuckles_to_left_palm": right_knuckles_to_left_palm,
+            "min_knuckles_to_palm": min_knuckles_to_palm,
             "left_palm_to_right_thumb": left_palm_to_right_thumb,
             "right_palm_to_left_thumb": right_palm_to_left_thumb,
             "min_palm_to_thumb": min(left_palm_to_right_thumb, right_palm_to_left_thumb),
             "mean_tip_dist": float(np.mean(tip_distances)),
-            "interlace_depth": float(left_tips_to_right_mcps),
+            "interlace_depth": float(interlace_depth),
+            "min_fingertip_spread": min_fingertip_spread,
         }
     else:
         inter_hand_features = {
@@ -233,11 +272,16 @@ def extract_hand_features(
             "left_palm_to_right_wrist": 99.0,
             "right_palm_to_left_wrist": 99.0,
             "min_palm_to_wrist": 99.0,
+            "wrist_ratio": 99.0,
+            "left_knuckles_to_right_palm": 99.0,
+            "right_knuckles_to_left_palm": 99.0,
+            "min_knuckles_to_palm": 99.0,
             "left_palm_to_right_thumb": 99.0,
             "right_palm_to_left_thumb": 99.0,
             "min_palm_to_thumb": 99.0,
             "mean_tip_dist": 99.0,
             "interlace_depth": 99.0,
+            "min_fingertip_spread": 99.0,
         }
 
     # 6. Velocity / Motion Features
@@ -287,9 +331,9 @@ def feature_dict_to_vector(features: Dict[str, Any]) -> np.ndarray:
       Palm Normal Dot: 1
       Left Angles: 5
       Right Angles: 5
-      Inter-hand geometric metrics: 13
+      Inter-hand geometric metrics: 16
       Velocity: 1
-    Total Feature Vector Dimension: 63 + 63 + 3 + 3 + 1 + 5 + 5 + 13 + 1 = 157
+    Total Feature Vector Dimension: 63 + 63 + 3 + 3 + 1 + 5 + 5 + 16 + 1 = 160
     """
     left_flat = features["left_norm"].flatten() if features.get("left_norm") is not None else np.zeros(63, dtype=np.float32)
     right_flat = features["right_norm"].flatten() if features.get("right_norm") is not None else np.zeros(63, dtype=np.float32)
@@ -311,11 +355,14 @@ def feature_dict_to_vector(features: Dict[str, Any]) -> np.ndarray:
             features["inter_hand"].get("left_palm_to_right_wrist", 99.0),
             features["inter_hand"].get("right_palm_to_left_wrist", 99.0),
             features["inter_hand"].get("min_palm_to_wrist", 99.0),
+            features["inter_hand"].get("wrist_ratio", 99.0),
+            features["inter_hand"].get("min_knuckles_to_palm", 99.0),
             features["inter_hand"].get("left_palm_to_right_thumb", 99.0),
             features["inter_hand"].get("right_palm_to_left_thumb", 99.0),
             features["inter_hand"].get("min_palm_to_thumb", 99.0),
             features["inter_hand"].get("mean_tip_dist", 99.0),
             features["inter_hand"].get("interlace_depth", 99.0),
+            features["inter_hand"].get("min_fingertip_spread", 99.0),
         ], dtype=np.float32),
         np.array([features.get("velocity", 0.0)], dtype=np.float32),
     ]

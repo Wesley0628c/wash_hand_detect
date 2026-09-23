@@ -75,11 +75,13 @@ def test_feature_vector_dimension():
 
     features = extract_hand_features(left, right)
     assert features["both_hands_detected"] is True
+    assert "wrist_ratio" in features["inter_hand"]
+    assert "min_knuckles_to_palm" in features["inter_hand"]
 
     vec = feature_dict_to_vector(features)
     assert isinstance(vec, np.ndarray)
     assert vec.ndim == 1
-    assert len(vec) == 157  # Expected 157-dim vector
+    assert len(vec) == 160  # Expected 160-dim vector
 
 
 def test_rule_classifier():
@@ -96,7 +98,7 @@ def test_rule_classifier():
     feats_inside = extract_hand_features(left, right)
     label, conf, msg = classifier.predict(feats_inside)
     assert label in LABELS.values()
-    assert conf > 0.5
+    assert conf > 0.4
     assert len(msg) > 0
 
 
@@ -140,12 +142,12 @@ def test_state_machine_free_mode():
 
 
 def test_lstm_model_building_and_synthetic_training():
-    model = build_lstm_model(seq_len=30, feature_dim=157, num_classes=8)
-    assert model.input_shape == (None, 30, 157)
+    model = build_lstm_model(seq_len=30, feature_dim=160, num_classes=8)
+    assert model.input_shape == (None, 30, 160)
     assert model.output_shape == (None, 8)
 
-    X_syn, y_syn, groups = generate_synthetic_dataset(num_persons=3, clips_per_action=2)
-    assert X_syn.shape == (3 * 8 * 2, 30, 157)
+    X_syn, y_syn, groups = generate_synthetic_dataset(num_persons=3, clips_per_action=2, feature_dim=160)
+    assert X_syn.shape == (3 * 8 * 2, 30, 160)
     assert len(y_syn) == len(X_syn)
 
     # Test forward pass

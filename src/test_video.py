@@ -51,9 +51,9 @@ def evaluate_video(
     print(f"   ROI 模式: {roi_mode} ({'啟用右側子母畫面裁切' if use_right_roi else '全畫面模式'})")
     print(f"=======================================================")
 
-    detector = HandDetector(max_num_hands=2, min_detection_confidence=0.15, min_tracking_confidence=0.15)
+    detector = HandDetector(max_num_hands=2, min_detection_confidence=0.5, min_tracking_confidence=0.5)
     classifier = WashHandRuleClassifier()
-    accumulator = TemporalProbabilityAccumulator(window_sec=window_sec, margin_threshold=0.06)
+    accumulator = TemporalProbabilityAccumulator(window_sec=window_sec, margin_threshold=0.12)
     state_machine = WashHandStateMachine(mode=guide_mode, step_duration=step_duration)
     state_machine.start()
 

@@ -18,24 +18,30 @@ class TemporalProbabilityAccumulator:
 
     def __init__(
         self,
-        window_sec: float = 1.0,
-        margin_threshold: float = 0.12,
-        min_conf: float = 0.35,
+        window_sec: float = 0.5,
+        margin_threshold: float = 0.15,
+        min_conf: float = 0.30,
+        consecutive_frames_required: int = 5,
     ):
         self.window_sec = window_sec
         self.margin_threshold = margin_threshold
         self.min_conf = min_conf
+        self.consecutive_frames_required = consecutive_frames_required
 
         # Queue storing (timestamp, {action_name: probability})
         self.history = deque()
         self.locked_action: str = "other"
         self.locked_conf: float = 0.0
+        self.pending_action: Optional[str] = None
+        self.pending_count: int = 0
 
     def reset(self):
         """Reset history and locked state."""
         self.history.clear()
         self.locked_action = "other"
         self.locked_conf = 0.0
+        self.pending_action = None
+        self.pending_count = 0
 
     def update(
         self,
@@ -58,14 +64,13 @@ class TemporalProbabilityAccumulator:
             return "other", 1.0, {"other": 1.0}
 
         # 2. Time-weighted probability accumulation
-        # Newer frames in the window get slightly higher weight (0.6 -> 1.0)
+        # Newer frames in the window get slightly higher weight (0.7 -> 1.0)
         integrated_scores: Dict[str, float] = {k: 0.0 for k in LABELS.values()}
         total_weight = 0.0
 
         for t, p_dict in self.history:
             age = max(0.0, now - t)
-            # Linear decay weight based on age inside window
-            weight = 1.0 - (0.4 * age / max(0.01, self.window_sec))
+            weight = 1.0 - (0.3 * age / max(0.01, self.window_sec))
             total_weight += weight
 
             for act, prob in p_dict.items():
@@ -80,22 +85,33 @@ class TemporalProbabilityAccumulator:
         sorted_acts = sorted(integrated_scores.items(), key=lambda x: x[1], reverse=True)
         top1_act, top1_score = sorted_acts[0]
 
-        # 4. Winner-Take-All Decision with Hysteresis Locking
-        # If currently locked into an active gesture (not "other"), require a margin to switch away
-        if self.locked_action != "other" and top1_act != self.locked_action:
+        # 4. Winner-Take-All Decision with Hysteresis Locking & Frame Confirmation
+        if top1_score >= self.min_conf:
+            candidate = top1_act
+        else:
+            candidate = "other"
+
+        if candidate != self.locked_action:
+            if candidate == self.pending_action:
+                self.pending_count += 1
+            else:
+                self.pending_action = candidate
+                self.pending_count = 1
+
+            # Check if pending candidate has won for required consecutive frames
             current_locked_score = integrated_scores.get(self.locked_action, 0.0)
-            # Only switch if candidate exceeds current by margin threshold
-            if top1_score > current_locked_score + self.margin_threshold and top1_score >= self.min_conf:
-                self.locked_action = top1_act
+            strong_margin = top1_score > current_locked_score + self.margin_threshold
+
+            if self.pending_count >= self.consecutive_frames_required or strong_margin:
+                self.locked_action = candidate
                 self.locked_conf = top1_score
+                self.pending_action = None
+                self.pending_count = 0
             else:
                 self.locked_conf = current_locked_score
         else:
-            if top1_score >= self.min_conf:
-                self.locked_action = top1_act
-                self.locked_conf = top1_score
-            else:
-                self.locked_action = "other"
-                self.locked_conf = integrated_scores.get("other", top1_score)
+            self.pending_action = None
+            self.pending_count = 0
+            self.locked_conf = top1_score
 
         return self.locked_action, self.locked_conf, integrated_scores

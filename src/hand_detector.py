@@ -10,14 +10,15 @@ import mediapipe as mp
 
 
 class HandDetector:
-    """Detects and separates Left and Right hands using MediaPipe."""
+    """Detects and separates Left and Right hands using MediaPipe with temporal tracking & dropout compensation."""
 
     def __init__(
         self,
         static_image_mode: bool = False,
         max_num_hands: int = 2,
-        min_detection_confidence: float = 0.25,
-        min_tracking_confidence: float = 0.25,
+        min_detection_confidence: float = 0.50,
+        min_tracking_confidence: float = 0.50,
+        ghost_frames_threshold: int = 4,
     ):
         self.mp_hands = mp.solutions.hands
         self.mp_draw = mp.solutions.drawing_utils
@@ -30,11 +31,25 @@ class HandDetector:
             min_tracking_confidence=min_tracking_confidence,
         )
 
+        # Temporal tracking memory
+        self.prev_left_hand: Optional[np.ndarray] = None
+        self.prev_right_hand: Optional[np.ndarray] = None
+        self.left_lost_count: int = 0
+        self.right_lost_count: int = 0
+        self.ghost_frames_threshold = ghost_frames_threshold
+
+    def reset_tracking(self):
+        """Reset temporal tracking history."""
+        self.prev_left_hand = None
+        self.prev_right_hand = None
+        self.left_lost_count = 0
+        self.right_lost_count = 0
+
     def process(
         self, frame: np.ndarray
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Any]:
         """
-        Process a BGR OpenCV frame with adaptive aspect-ratio ROI handling.
+        Process a BGR OpenCV frame with adaptive ROI cropping and temporal ID tracking.
         Returns:
             left_hand: np.ndarray of shape (21, 3) or None
             right_hand: np.ndarray of shape (21, 3) or None
@@ -42,35 +57,33 @@ class HandDetector:
         """
         h, w = frame.shape[:2]
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.hands.process(rgb_frame)
 
-        # Adaptive ROI Fallback when full frame has no hands
+        # 1. Decide if split-screen ROI is needed
+        # If aspect ratio is wide (e.g. split-screen educational video), crop right hand-wash area
         is_roi = False
         xmin, xmax, roi_w = 0, w, w
         ymin, ymax, roi_h = 0, h, h
 
-        if not results.multi_hand_landmarks or len(results.multi_hand_landmarks) == 0:
-            # Check 1: Split-screen / Educational video (hands in right half)
-            if w > h * 1.3:
-                xmin, xmax = int(w * 0.42), w
-                roi_w = xmax - xmin
-                roi = rgb_frame[:, xmin:xmax]
-                roi_results = self.hands.process(roi)
-                if roi_results.multi_hand_landmarks:
-                    results = roi_results
-                    is_roi = True
-            # Check 2: Vertical video central crop
-            elif h > w * 1.2:
-                ymin, ymax = int(h * 0.20), int(h * 0.80)
-                roi_h = ymax - ymin
-                roi = rgb_frame[ymin:ymax, :]
-                roi_results = self.hands.process(roi)
-                if roi_results.multi_hand_landmarks:
-                    results = roi_results
-                    is_roi = True
+        if w > h * 1.3:
+            # Wide video / split screen: Hands in right 58% of the frame
+            xmin, xmax = int(w * 0.42), w
+            ymin, ymax = int(h * 0.05), int(h * 0.95)
+            roi_w = xmax - xmin
+            roi_h = ymax - ymin
+            roi = rgb_frame[ymin:ymax, xmin:xmax]
+            # Upscale ROI for improved landmark resolution
+            roi_scaled = cv2.resize(roi, (roi_w * 2, roi_h * 2), interpolation=cv2.INTER_LINEAR)
+            results = self.hands.process(roi_scaled)
+            if results.multi_hand_landmarks and len(results.multi_hand_landmarks) > 0:
+                is_roi = True
+            else:
+                # Fallback to full frame if ROI had no hands
+                results = self.hands.process(rgb_frame)
+        else:
+            results = self.hands.process(rgb_frame)
 
-        left_hand = None
-        right_hand = None
+        curr_left_hand = None
+        curr_right_hand = None
 
         if results.multi_hand_landmarks and results.multi_handedness:
             extracted_coords = []
@@ -85,7 +98,7 @@ class HandDetector:
                     dtype=np.float32,
                 )
                 if is_roi:
-                    # Map coordinates back to full image normalized space [0, 1]
+                    # Map coordinates from ROI back to full image normalized space [0, 1]
                     coords[:, 0] = (coords[:, 0] * roi_w + xmin) / float(w)
                     coords[:, 1] = (coords[:, 1] * roi_h + ymin) / float(h)
                     for idx_lm, lm_obj in enumerate(hand_landmarks.landmark):
@@ -95,33 +108,91 @@ class HandDetector:
                 extracted_coords.append(coords)
                 extracted_labels.append(label)
 
+            # 2. Hand ID Assignment & Temporal Tracking
             if len(extracted_coords) == 1:
-                if extracted_labels[0] == "Left":
-                    left_hand = extracted_coords[0]
-                else:
-                    right_hand = extracted_coords[0]
-            elif len(extracted_coords) >= 2:
-                # If two hands detected, ensure both left and right are assigned even if labels duplicate
-                if extracted_labels[0] != extracted_labels[1]:
-                    for c, lab in zip(extracted_coords[:2], extracted_labels[:2]):
-                        if lab == "Left":
-                            left_hand = c
-                        else:
-                            right_hand = c
-                else:
-                    # Duplicate label fallback: sort by wrist X-coordinate
-                    if extracted_coords[0][0, 0] <= extracted_coords[1][0, 0]:
-                        left_hand, right_hand = extracted_coords[0], extracted_coords[1]
-                    else:
-                        left_hand, right_hand = extracted_coords[1], extracted_coords[0]
+                hand_cand = extracted_coords[0]
+                label_cand = extracted_labels[0]
 
-        return left_hand, right_hand, results
+                # Check previous distance if available
+                if self.prev_left_hand is not None and self.prev_right_hand is not None:
+                    d_to_left = np.linalg.norm(hand_cand[0] - self.prev_left_hand[0])
+                    d_to_right = np.linalg.norm(hand_cand[0] - self.prev_right_hand[0])
+                    if d_to_left < d_to_right and d_to_left < 0.25:
+                        curr_left_hand = hand_cand
+                    elif d_to_right < d_to_left and d_to_right < 0.25:
+                        curr_right_hand = hand_cand
+                    else:
+                        if label_cand == "Left":
+                            curr_left_hand = hand_cand
+                        else:
+                            curr_right_hand = hand_cand
+                else:
+                    if label_cand == "Left":
+                        curr_left_hand = hand_cand
+                    else:
+                        curr_right_hand = hand_cand
+
+            elif len(extracted_coords) >= 2:
+                h1, h2 = extracted_coords[0], extracted_coords[1]
+                l1, l2 = extracted_labels[0], extracted_labels[1]
+
+                # If labels are distinct and we have no strong previous history
+                if l1 != l2 and (self.prev_left_hand is None or self.prev_right_hand is None):
+                    curr_left_hand = h1 if l1 == "Left" else h2
+                    curr_right_hand = h2 if l1 == "Left" else h1
+                elif self.prev_left_hand is not None and self.prev_right_hand is not None:
+                    # Hungarian/Euclidean matching against previous wrist positions
+                    cost_standard = (
+                        np.linalg.norm(h1[0] - self.prev_left_hand[0])
+                        + np.linalg.norm(h2[0] - self.prev_right_hand[0])
+                    )
+                    cost_swapped = (
+                        np.linalg.norm(h2[0] - self.prev_left_hand[0])
+                        + np.linalg.norm(h1[0] - self.prev_right_hand[0])
+                    )
+                    if cost_standard <= cost_swapped:
+                        curr_left_hand, curr_right_hand = h1, h2
+                    else:
+                        curr_left_hand, curr_right_hand = h2, h1
+                else:
+                    # Fallback when labels duplicate and no history: sort by wrist X
+                    if h1[0, 0] <= h2[0, 0]:
+                        curr_left_hand, curr_right_hand = h1, h2
+                    else:
+                        curr_left_hand, curr_right_hand = h2, h1
+
+        # 3. Temporal Dropout Smoothing / Ghosting for Foam & Occlusion
+        if curr_left_hand is not None:
+            self.prev_left_hand = curr_left_hand.copy()
+            self.left_lost_count = 0
+            final_left = curr_left_hand
+        elif self.prev_left_hand is not None and self.left_lost_count < self.ghost_frames_threshold:
+            self.left_lost_count += 1
+            final_left = self.prev_left_hand
+        else:
+            final_left = None
+            self.prev_left_hand = None
+            self.left_lost_count = 0
+
+        if curr_right_hand is not None:
+            self.prev_right_hand = curr_right_hand.copy()
+            self.right_lost_count = 0
+            final_right = curr_right_hand
+        elif self.prev_right_hand is not None and self.right_lost_count < self.ghost_frames_threshold:
+            self.right_lost_count += 1
+            final_right = self.prev_right_hand
+        else:
+            final_right = None
+            self.prev_right_hand = None
+            self.right_lost_count = 0
+
+        return final_left, final_right, results
 
     def draw_hands(
         self, frame: np.ndarray, results: Any, draw_styled: bool = True
     ) -> np.ndarray:
         """Draw hand skeleton overlay onto frame."""
-        if not results.multi_hand_landmarks:
+        if not results or not results.multi_hand_landmarks:
             return frame
 
         canvas = frame.copy()
@@ -129,7 +200,6 @@ class HandDetector:
             results.multi_hand_landmarks, results.multi_handedness
         ):
             label = handedness.classification[0].label
-            # Color distinctions for left/right
             if draw_styled:
                 self.mp_draw.draw_landmarks(
                     canvas,

@@ -15,7 +15,7 @@ from typing import Tuple, List, Dict
 from src.rule_classifier import LABELS, NAME_TO_LABEL, LABEL_SHORT_ZH
 
 
-def build_lstm_model(seq_len: int = 30, feature_dim: int = 157, num_classes: int = 8) -> tf.keras.Model:
+def build_lstm_model(seq_len: int = 30, feature_dim: int = 160, num_classes: int = 8) -> tf.keras.Model:
     """Build the LSTM model architecture defined in IMPLEMENTATION.md Phase 12."""
     model = tf.keras.Sequential([
         tf.keras.layers.Input(shape=(seq_len, feature_dim)),
@@ -67,7 +67,7 @@ def load_dataset_from_disk(data_dir: str = "data/processed") -> Tuple[np.ndarray
                 groups_list.append(person_id)
 
     if not X_list:
-        return np.empty((0, 30, 157)), np.empty((0,)), np.empty((0,))
+        return np.empty((0, 30, 160)), np.empty((0,)), np.empty((0,))
 
     return np.array(X_list, dtype=np.float32), np.array(y_list, dtype=np.int32), np.array(groups_list)
 
@@ -76,7 +76,7 @@ def generate_synthetic_dataset(
     num_persons: int = 10,
     clips_per_action: int = 15,
     seq_len: int = 30,
-    feature_dim: int = 157,
+    feature_dim: int = 160,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Generate realistic synthetic landmark sequences for demonstration & pipeline testing."""
     X_list = []
