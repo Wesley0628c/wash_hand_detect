@@ -206,3 +206,30 @@ def test_temporal_probability_accumulator():
 
     assert label == "inside"
 
+
+def test_temporal_feature_buffer_and_ml_classifier():
+    from src.temporal_features import TemporalFeatureBuffer, apply_landmark_dropout
+    from src.ml_classifier import WashHandMLClassifier
+
+    # Test buffer shape
+    buf = TemporalFeatureBuffer(buffer_size=15, base_dim=160)
+    for _ in range(20):
+        vec = np.random.rand(160).astype(np.float32)
+        out = buf.update(vec)
+    assert out.shape == (960,)
+
+    # Test landmark dropout
+    left = _create_dummy_hand()
+    right = _create_dummy_hand()
+    aug_l, aug_r = apply_landmark_dropout(left, right, point_dropout_prob=0.3)
+    # Ensure function executes correctly
+    assert aug_l is None or aug_l.shape == (21, 3)
+
+    # Test ML Classifier interface
+    ml_clf = WashHandMLClassifier(hybrid_with_rules=True)
+    feats = extract_hand_features(left, right)
+    probs = ml_clf.predict_probabilities(feats)
+    assert isinstance(probs, dict)
+    assert "inside" in probs
+    assert np.isclose(sum(probs.values()), 1.0, atol=1e-4)
+

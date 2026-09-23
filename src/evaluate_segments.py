@@ -6,15 +6,18 @@ computing Frame Accuracy, Segment Precision, Recall, F1-score, and Confusion Mat
 
 import os
 import argparse
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 import cv2
 import numpy as np
 from sklearn.metrics import classification_report, confusion_matrix
 
 from src.hand_detector import HandDetector
 from src.features import extract_hand_features
-from src.rule_classifier import WashHandRuleClassifier, LABELS, NAME_TO_LABEL, LABEL_SHORT_ZH
+from src.rule_classifier import WashHandRuleClassifier, LABELS, NAME_TO_LABEL, LABEL_SHORT_ZH, FEEDBACK_ZH
+from src.ml_classifier import WashHandMLClassifier
 from src.accumulator import TemporalProbabilityAccumulator
+from src.state_machine import WashHandStateMachine
+from src.ui import WashHandHUD
 
 # Ground Truth Segment Definitions
 BENCHMARK_GROUND_TRUTH = {
@@ -52,6 +55,9 @@ def get_ground_truth_label(time_sec: float, segments: List[Tuple[float, float, s
 
 def evaluate_video(
     video_path: str,
+    output_annotated_path: Optional[str] = None,
+    show_window: bool = False,
+    model_type: str = "hybrid",
     window_sec: float = 0.5,
     margin_threshold: float = 0.15,
 ) -> Dict[str, Any]:
@@ -65,10 +71,31 @@ def evaluate_video(
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     detector = HandDetector(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-    classifier = WashHandRuleClassifier()
+
+    if model_type == "ml":
+        classifier = WashHandMLClassifier(hybrid_with_rules=False)
+        mode_str = "ML (XGBoost)"
+    elif model_type == "hybrid":
+        classifier = WashHandMLClassifier(hybrid_with_rules=True, rule_weight=0.3)
+        mode_str = "Hybrid (XGBoost + Rules)"
+    else:
+        classifier = WashHandRuleClassifier()
+        mode_str = "Rule-based V2"
+
     accumulator = TemporalProbabilityAccumulator(window_sec=window_sec, margin_threshold=margin_threshold)
+    state_machine = WashHandStateMachine(mode="free", step_duration=1.0)
+    state_machine.start()
+    hud = WashHandHUD()
+
+    writer = None
+    if output_annotated_path:
+        os.makedirs(os.path.dirname(os.path.abspath(output_annotated_path)), exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(output_annotated_path, fourcc, fps, (width, height))
 
     y_true = []
     y_pred = []
@@ -78,7 +105,10 @@ def evaluate_video(
     frame_idx = 0
     print(f"\n=======================================================")
     print(f"📊 正在評估影片: {video_path}")
-    print(f"   總幀數: {total_frames} | FPS: {fps:.1f} | 窗口: {window_sec}s")
+    print(f"   解析度: {width}x{height} | 總幀數: {total_frames} | FPS: {fps:.1f}")
+    print(f"   模型類型: {mode_str} | 決策窗口: {window_sec}s")
+    if output_annotated_path:
+        print(f"   輸出帶 HUD 影片: {output_annotated_path}")
     print(f"=======================================================")
 
     while cap.isOpened():
@@ -87,14 +117,19 @@ def evaluate_video(
             break
 
         timestamp = frame_idx / fps
+        dt = 1.0 / fps
         gt_label = get_ground_truth_label(timestamp, segments)
 
-        left_hand, right_hand, _ = detector.process(frame)
+        left_hand, right_hand, results = detector.process(frame)
         features = extract_hand_features(
             left_hand, right_hand, prev_left_hand=prev_left, prev_right_hand=prev_right
         )
         probs = classifier.predict_probabilities(features)
-        pred_label, _, _ = accumulator.update(probs, timestamp=timestamp)
+        pred_label, pred_conf, _ = accumulator.update(probs, timestamp=timestamp)
+
+        state_machine.update(pred_label, dt=dt)
+        summary = state_machine.get_progress_summary()
+        feedback_msg = FEEDBACK_ZH.get(pred_label, "請依七步口訣持續搓洗")
 
         prev_left = left_hand
         prev_right = right_hand
@@ -103,7 +138,31 @@ def evaluate_video(
         y_pred.append(pred_label)
         frame_idx += 1
 
+        # Draw HUD and annotations if saving or displaying
+        if writer or show_window:
+            canvas = detector.draw_hands(frame.copy(), results)
+            annotated_frame = hud.draw_hud(
+                frame=canvas,
+                detected_label=pred_label,
+                confidence=pred_conf,
+                feedback_msg=f"[GT: {LABEL_SHORT_ZH.get(gt_label, gt_label)}] {feedback_msg}",
+                progress_summary=summary,
+                fps=fps,
+                mode_str=mode_str,
+            )
+            if writer:
+                writer.write(annotated_frame)
+            if show_window:
+                cv2.imshow("Wash Hand Detect - Evaluation", annotated_frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
     cap.release()
+    if writer:
+        writer.release()
+        print(f"[✅] 已成功儲存視覺化辨識結果影片至: {output_annotated_path}")
+    if show_window:
+        cv2.destroyAllWindows()
     detector.close()
 
     # Calculate metrics
@@ -151,8 +210,18 @@ def evaluate_video(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate 7-step hand wash detector on ground truth video.")
     parser.add_argument("--video", type=str, default="data/raw/wash_7steps_yt.mp4", help="Video path")
+    parser.add_argument("--output", type=str, default=None, help="Output annotated video path (.mp4)")
+    parser.add_argument("--show", action="store_true", help="Show real-time window")
+    parser.add_argument("--model-type", type=str, default="hybrid", choices=["rule", "ml", "hybrid"], help="Classifier type")
     parser.add_argument("--window-sec", type=float, default=0.5, help="Temporal window size in seconds")
     parser.add_argument("--margin", type=float, default=0.15, help="Hysteresis margin")
     args = parser.parse_args()
 
-    evaluate_video(args.video, window_sec=args.window_sec, margin_threshold=args.margin)
+    evaluate_video(
+        args.video,
+        output_annotated_path=args.output,
+        show_window=args.show,
+        model_type=args.model_type,
+        window_sec=args.window_sec,
+        margin_threshold=args.margin,
+    )
