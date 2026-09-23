@@ -37,13 +37,13 @@ def get_font(size: int = 20) -> ImageFont.FreeTypeFont:
 
 
 class WashHandHUD:
-    """Renders state-of-the-art UI overlay on top of OpenCV camera frames."""
+    """Renders sleek, modern, real-time action recognition UI without distracting checklist sidebars."""
 
     def __init__(self):
         self.font_sm = get_font(16)
         self.font_md = get_font(22)
         self.font_lg = get_font(30)
-        self.font_xl = get_font(40)
+        self.font_xl = get_font(38)
 
     def draw_hud(
         self,
@@ -51,59 +51,37 @@ class WashHandHUD:
         detected_label: str,
         confidence: float,
         feedback_msg: str,
-        progress_summary: Dict[str, Any],
-        fps: float,
-        mode_str: str = "Rule-based",
+        progress_summary: Optional[Dict[str, Any]] = None,
+        fps: float = 0.0,
+        mode_str: str = "HYBRID",
+        hands_status: Optional[Dict[str, bool]] = None,
     ) -> np.ndarray:
-        """Render complete HUD onto the frame."""
+        """Render clean, instant real-time HUD onto the frame."""
         h, w, _ = frame.shape
         overlay = frame.copy()
 
-        # 1. Top Header Bar
-        cv2.rectangle(overlay, (0, 0), (w, 50), (18, 22, 28), -1)
+        # 1. Top Header Bar (Semi-transparent dark glass)
+        cv2.rectangle(overlay, (0, 0), (w, 54), (18, 22, 28), -1)
 
-        # 2. Side Checklist Panel
-        # In wide split-screen (e.g. teaching video with text on left, video on right),
-        # place checklist on the left (x=20) so it doesn't block the washing hand video on the right.
-        panel_w = 260
-        if w > h * 1.3:
-            panel_x = 20
-        else:
-            panel_x = w - panel_w - 20
-        panel_y = 60
-        panel_h = 360
-        cv2.rectangle(
-            overlay,
-            (panel_x, panel_y),
-            (panel_x + panel_w, panel_y + panel_h),
-            (22, 26, 35),
-            -1,
-        )
-        cv2.rectangle(
-            overlay,
-            (panel_x, panel_y),
-            (panel_x + panel_w, panel_y + panel_h),
-            (55, 65, 80),
-            1,
-        )
-
-        # 3. Bottom Feedback Banner
-        banner_h = 70
-        banner_y = h - banner_h - 15
+        # 2. Bottom Main Action Card (Sleek Glassmorphic Card)
+        banner_h = 80
+        banner_y = h - banner_h - 18
         banner_x = 20
         banner_w = w - 40
         cv2.rectangle(
             overlay,
             (banner_x, banner_y),
             (banner_x + banner_w, banner_y + banner_h),
-            (18, 22, 30),
+            (18, 22, 32),
             -1,
         )
+        # Highlight card border based on detected label
+        border_color = (40, 200, 100) if detected_label in STEPS_ORDER else (70, 80, 95)
         cv2.rectangle(
             overlay,
             (banner_x, banner_y),
             (banner_x + banner_w, banner_y + banner_h),
-            (45, 140, 240),
+            border_color,
             2,
         )
 
@@ -111,79 +89,68 @@ class WashHandHUD:
         alpha = 0.85
         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
-        # Convert to PIL Image for high quality Unicode/Chinese text rendering
+        # Convert to PIL Image for crisp Chinese typography
         img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(img_pil)
 
-        # Draw Header
-        draw.text((25, 12), "七步洗手即時辨識系統 (Wash Hand Detect)", fill=(255, 255, 255), font=self.font_md)
-        draw.text((w - 220, 14), f"FPS: {fps:.1f}  |  {mode_str}", fill=(180, 200, 220), font=self.font_sm)
+        # Draw Header Info
+        draw.text((25, 14), "七步洗手即時辨識系統 (Wash Hand Detect)", fill=(255, 255, 255), font=self.font_md)
 
-        # Draw Checklist in Panel
-        panel_title = "七步洗手 (自由模式)" if progress_summary.get("mode") == "free" else "七步洗手 (順序教學)"
-        draw.text((panel_x + 15, panel_y + 12), panel_title, fill=(255, 220, 100), font=self.font_md)
-        completed_set = set(progress_summary.get("completed_steps", []))
-        target_step = progress_summary.get("target_step")
-        active_step = progress_summary.get("active_step")
-        step_progresses = progress_summary.get("step_progresses", {})
+        # Hand Tracking Indicator Dots in Header
+        if hands_status is not None:
+            left_ok = hands_status.get("left", False)
+            right_ok = hands_status.get("right", False)
+            left_color = (0, 255, 150) if left_ok else (130, 140, 150)
+            right_color = (255, 160, 50) if right_ok else (130, 140, 150)
+            status_text = f"左手 [{'●' if left_ok else '○'}]  右手 [{'●' if right_ok else '○'}]"
+            draw.text((w // 2 - 80, 16), status_text, fill=(220, 230, 240), font=self.font_sm)
 
-        step_y = panel_y + 46
-        for step in STEPS_ORDER:
-            step_zh = STEPS_ZH[step]
-            is_done = step in completed_set
-            is_curr = (step == target_step) or (progress_summary.get("mode") == "free" and step == active_step)
-            step_prog = step_progresses.get(step, 1.0 if is_done else 0.0)
+        draw.text((w - 240, 16), f"FPS: {fps:.1f}  |  {mode_str}", fill=(180, 205, 230), font=self.font_sm)
 
-            if is_done:
-                icon = "[OK]"
-                text = f"{icon} {step_zh} ({step})"
-                color = (100, 240, 120)
-            elif is_curr:
-                icon = "[->]"
-                text = f"{icon} {step_zh} ({step})"
-                color = (255, 200, 60)
+        # 3. Top-Center 7-Step Quick Badges Bar (Visual reference)
+        badges_y = 66
+        badge_w, badge_h = 58, 30
+        total_badges_w = len(STEPS_ORDER) * (badge_w + 10)
+        start_bx = max(20, (w - total_badges_w) // 2)
+
+        for i, step in enumerate(STEPS_ORDER):
+            bx = start_bx + i * (badge_w + 10)
+            is_active = (detected_label == step)
+            step_zh = STEPS_ZH.get(step, step)
+
+            # Badge background
+            if is_active:
+                bg_col = (255, 180, 30)
+                txt_col = (20, 20, 20)
+                outline_col = (255, 220, 100)
             else:
-                icon = "[  ]"
-                text = f"{icon} {step_zh} ({step})"
-                color = (160, 170, 185)
+                bg_col = (30, 35, 45)
+                txt_col = (160, 175, 190)
+                outline_col = (60, 70, 85)
 
-            draw.text((panel_x + 15, step_y), text, fill=color, font=self.font_sm)
+            draw.rectangle([bx, badges_y, bx + badge_w, badges_y + badge_h], fill=bg_col, outline=outline_col, width=1)
+            draw.text((bx + 10, badges_y + 4), f"{step_zh} ({step[0].upper()})", fill=txt_col, font=self.font_sm)
 
-            # Draw mini progress bar for each step
-            bar_x = panel_x + 145
-            bar_y = step_y + 4
-            bar_w_max = 95
-            draw.rectangle([bar_x, bar_y, bar_x + bar_w_max, bar_y + 10], fill=(45, 50, 60))
-            if is_done:
-                draw.rectangle([bar_x, bar_y, bar_x + bar_w_max, bar_y + 10], fill=(60, 210, 100))
-            elif step_prog > 0:
-                draw.rectangle([bar_x, bar_y, bar_x + int(bar_w_max * step_prog), bar_y + 10], fill=(255, 180, 0))
+        # 4. Bottom Main Action Card Content
+        curr_zh = LABEL_NAMES_ZH.get(detected_label, LABEL_SHORT_ZH.get(detected_label, detected_label))
+        action_color = (100, 255, 160) if detected_label in STEPS_ORDER else (200, 210, 225)
+        draw.text((banner_x + 22, banner_y + 12), f"當前動作：【 {curr_zh} 】", fill=action_color, font=self.font_lg)
 
-            step_y += 36
+        # Confidence Bar
+        conf_pct = int(max(0.0, min(1.0, confidence)) * 100)
+        draw.text((banner_x + 420, banner_y + 16), f"信心度：{conf_pct}%", fill=(100, 220, 255), font=self.font_md)
 
-        # Draw Total Wash Time
-        total_time = progress_summary.get("total_time", 0.0)
-        completed_count = progress_summary.get("completed_count", 0)
-        draw.text(
-            (panel_x + 15, panel_y + panel_h - 32),
-            f"進度: {completed_count}/7 | 總時間: {total_time:.1f}s",
-            fill=(220, 230, 245),
-            font=self.font_sm,
-        )
+        # Mini confidence progress bar
+        cbar_x = banner_x + 560
+        cbar_y = banner_y + 22
+        cbar_w = min(180, w - cbar_x - 30)
+        if cbar_w > 50:
+            draw.rectangle([cbar_x, cbar_y, cbar_x + cbar_w, cbar_y + 12], fill=(45, 55, 70))
+            fill_w = int(cbar_w * (conf_pct / 100.0))
+            bar_color = (0, 220, 140) if conf_pct >= 60 else (255, 180, 50)
+            draw.rectangle([cbar_x, cbar_y, cbar_x + fill_w, cbar_y + 12], fill=bar_color)
 
-        # Draw Current Detected Gesture & Feedback Banner
-        curr_zh = LABEL_SHORT_ZH.get(detected_label, detected_label)
-        draw.text((banner_x + 20, banner_y + 10), f"當前動作：{curr_zh} ({detected_label})", fill=(255, 255, 255), font=self.font_lg)
-        draw.text((banner_x + 360, banner_y + 15), f"信心度：{confidence*100:.0f}%", fill=(100, 220, 255), font=self.font_md)
-        draw.text((banner_x + 20, banner_y + 42), f"指導提示：{feedback_msg}", fill=(240, 200, 100), font=self.font_sm)
-
-        # Completion Victory Screen (Bottom right toast or banner)
-        if progress_summary.get("is_completed", False):
-            toast_w, toast_h = 460, 60
-            toast_x = w - toast_w - 20
-            toast_y = 60
-            draw.rectangle([toast_x, toast_y, toast_x + toast_w, toast_y + toast_h], fill=(20, 45, 30), outline=(0, 255, 150), width=2)
-            draw.text((toast_x + 15, toast_y + 10), "★ 洗手完成！恭喜達成七步洗手！", fill=(100, 255, 150), font=self.font_md)
-            draw.text((toast_x + 15, toast_y + 35), f"總洗手時間：{total_time:.1f} 秒 | 動作確實清潔！", fill=(220, 240, 230), font=self.font_sm)
+        # Real-time Feedback Hint
+        draw.text((banner_x + 24, banner_y + 48), f"指導提示：{feedback_msg}", fill=(255, 215, 120), font=self.font_sm)
 
         return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)

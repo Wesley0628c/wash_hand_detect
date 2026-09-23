@@ -118,6 +118,10 @@ class RealtimeWashHandDetector:
                 print(f"[🎉] 恭喜！已完成步驟: {completed_step}")
 
             # 6. UI HUD Rendering
+            hands_status = {
+                "left": left_hand is not None,
+                "right": right_hand is not None,
+            }
             progress = self.state_machine.get_progress_summary()
             final_frame = self.hud.draw_hud(
                 canvas,
@@ -127,9 +131,10 @@ class RealtimeWashHandDetector:
                 progress_summary=progress,
                 fps=self.camera.fps,
                 mode_str=mode_display,
+                hands_status=hands_status,
             )
 
-            cv2.imshow("Wash Hand Detect — MediaPipe 7-Steps", final_frame)
+            cv2.imshow("Wash Hand Detect — Real-time Action Recognition", final_frame)
 
             # Key Handling
             key = cv2.waitKey(1) & 0xFF

@@ -28,10 +28,12 @@ class HandDetector:
         min_detection_confidence: float = 0.50,
         min_tracking_confidence: float = 0.50,
         ghost_frames_threshold: int = 4,
+        crop_split_screen: bool = False,
     ):
         self.mp_hands = mp.solutions.hands
         self.mp_draw = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
+        self.crop_split_screen = crop_split_screen
 
         self.hands = self.mp_hands.Hands(
             static_image_mode=static_image_mode,
@@ -55,10 +57,10 @@ class HandDetector:
         self.right_lost_count = 0
 
     def process(
-        self, frame: np.ndarray
+        self, frame: np.ndarray, crop_split_screen: Optional[bool] = None
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Any]:
         """
-        Process a BGR OpenCV frame with adaptive ROI cropping, CLAHE enhancement, and temporal ID tracking.
+        Process a BGR OpenCV frame with full frame MediaPipe tracking and CLAHE enhancement.
         Returns:
             left_hand: np.ndarray of shape (21, 3) or None
             right_hand: np.ndarray of shape (21, 3) or None
@@ -67,25 +69,23 @@ class HandDetector:
         h, w = frame.shape[:2]
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # 1. Decide if split-screen ROI is needed
+        use_split_crop = self.crop_split_screen if crop_split_screen is None else crop_split_screen
         is_roi = False
         xmin, xmax, roi_w = 0, w, w
         ymin, ymax, roi_h = 0, h, h
 
-        if w > h * 1.3:
-            # Wide video / split screen: Hands in right 58% of the frame
+        if use_split_crop and w > h * 1.3:
+            # Explicit split screen mode: Hands in right 58% of the frame
             xmin, xmax = int(w * 0.42), w
             ymin, ymax = int(h * 0.05), int(h * 0.95)
             roi_w = xmax - xmin
             roi_h = ymax - ymin
             roi = rgb_frame[ymin:ymax, xmin:xmax]
-            # Upscale ROI for improved landmark resolution
             roi_scaled = cv2.resize(roi, (roi_w * 2, roi_h * 2), interpolation=cv2.INTER_LINEAR)
             results = self.hands.process(roi_scaled)
             if results.multi_hand_landmarks and len(results.multi_hand_landmarks) > 0:
                 is_roi = True
             else:
-                # Try CLAHE enhancement on ROI if dense foam obscured landmarks
                 roi_clahe = _enhance_contrast_clahe(roi_scaled)
                 results_clahe = self.hands.process(roi_clahe)
                 if results_clahe.multi_hand_landmarks and len(results_clahe.multi_hand_landmarks) > 0:
@@ -94,12 +94,13 @@ class HandDetector:
                 else:
                     results = self.hands.process(rgb_frame)
         else:
+            # Default: Full frame detection
             results = self.hands.process(rgb_frame)
-            # CLAHE fallback for normal frame under heavy foam
-            if not results.multi_hand_landmarks or len(results.multi_hand_landmarks) == 0:
+            # If hands not found or only 1 hand found under foam, fallback to CLAHE contrast enhancement
+            if not results.multi_hand_landmarks or len(results.multi_hand_landmarks) < 2:
                 enhanced = _enhance_contrast_clahe(rgb_frame)
                 results_clahe = self.hands.process(enhanced)
-                if results_clahe.multi_hand_landmarks and len(results_clahe.multi_hand_landmarks) > 0:
+                if results_clahe.multi_hand_landmarks and len(results_clahe.multi_hand_landmarks) > (len(results.multi_hand_landmarks) if results.multi_hand_landmarks else 0):
                     results = results_clahe
 
         curr_left_hand = None
