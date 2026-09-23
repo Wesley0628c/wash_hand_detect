@@ -120,17 +120,19 @@ class WashHandHUD:
         draw.text((w - 220, 14), f"FPS: {fps:.1f}  |  {mode_str}", fill=(180, 200, 220), font=self.font_sm)
 
         # Draw Checklist in Panel
-        draw.text((panel_x + 15, panel_y + 12), "七步洗手進度", fill=(255, 220, 100), font=self.font_md)
+        panel_title = "七步洗手 (自由模式)" if progress_summary.get("mode") == "free" else "七步洗手 (順序教學)"
+        draw.text((panel_x + 15, panel_y + 12), panel_title, fill=(255, 220, 100), font=self.font_md)
         completed_set = set(progress_summary.get("completed_steps", []))
         target_step = progress_summary.get("target_step")
         active_step = progress_summary.get("active_step")
-        step_progress = progress_summary.get("current_step_progress", 0.0)
+        step_progresses = progress_summary.get("step_progresses", {})
 
         step_y = panel_y + 46
         for step in STEPS_ORDER:
             step_zh = STEPS_ZH[step]
             is_done = step in completed_set
-            is_curr = (step == target_step) or (progress_summary["mode"] == "free" and step == active_step)
+            is_curr = (step == target_step) or (progress_summary.get("mode") == "free" and step == active_step)
+            step_prog = step_progresses.get(step, 1.0 if is_done else 0.0)
 
             if is_done:
                 icon = "[OK]"
@@ -147,13 +149,15 @@ class WashHandHUD:
 
             draw.text((panel_x + 15, step_y), text, fill=color, font=self.font_sm)
 
-            # Draw mini progress bar for active step
-            if is_curr and not is_done:
-                bar_x = panel_x + 140
-                bar_y = step_y + 4
-                bar_w_max = 100
-                draw.rectangle([bar_x, bar_y, bar_x + bar_w_max, bar_y + 10], fill=(60, 60, 60))
-                draw.rectangle([bar_x, bar_y, bar_x + int(bar_w_max * step_progress), bar_y + 10], fill=(255, 180, 0))
+            # Draw mini progress bar for each step
+            bar_x = panel_x + 145
+            bar_y = step_y + 4
+            bar_w_max = 95
+            draw.rectangle([bar_x, bar_y, bar_x + bar_w_max, bar_y + 10], fill=(45, 50, 60))
+            if is_done:
+                draw.rectangle([bar_x, bar_y, bar_x + bar_w_max, bar_y + 10], fill=(60, 210, 100))
+            elif step_prog > 0:
+                draw.rectangle([bar_x, bar_y, bar_x + int(bar_w_max * step_prog), bar_y + 10], fill=(255, 180, 0))
 
             step_y += 36
 

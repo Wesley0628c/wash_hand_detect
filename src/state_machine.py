@@ -33,9 +33,9 @@ class WashHandStateMachine:
 
     def __init__(
         self,
-        mode: str = "sequence",  # "sequence" or "free"
-        step_duration: float = 2.5,  # required continuous seconds per step
-        error_tolerance: float = 0.4,  # grace window before resetting timer on bad frame
+        mode: str = "free",  # "free" (default: any random order) or "sequence" (teaching order)
+        step_duration: float = 2.0,  # required seconds per step
+        error_tolerance: float = 0.4,  # grace window before decaying active step
     ):
         self.mode = mode
         self.step_duration = step_duration
@@ -79,48 +79,59 @@ class WashHandStateMachine:
         if self.start_time is None and detected_label in STEPS_ORDER:
             self.start_time = time.time()
 
-        target_step = self._get_target_step()
         just_completed = False
         completed_step_name = None
 
         if self.mode == "sequence":
+            target_step = self._get_target_step()
             is_valid_action = (detected_label == target_step)
-            active_target = target_step
-        else:  # "free" mode
-            is_valid_action = (detected_label in STEPS_ORDER and detected_label not in self.completed_steps)
-            active_target = detected_label if is_valid_action else self.active_step
 
-        if is_valid_action and active_target is not None:
-            if self.active_step != active_target:
-                self.active_step = active_target
-                self.step_timer = 0.0
+            if is_valid_action and target_step is not None:
+                if self.active_step != target_step:
+                    self.active_step = target_step
+                    self.step_timer = 0.0
+                    self.grace_timer = 0.0
+
+                self.step_timer += dt
+                self.step_times[target_step] += dt
                 self.grace_timer = 0.0
 
-            self.step_timer += dt
-            self.step_times[active_target] += dt
-            self.grace_timer = 0.0
-
-            if self.step_timer >= self.step_duration or (self.mode == "free" and self.step_times[active_target] >= self.step_duration):
-                self.completed_steps.add(active_target)
-                just_completed = True
-                completed_step_name = active_target
-                self.step_timer = 0.0
-                self.active_step = None
-
-                if self.mode == "sequence":
+                if self.step_timer >= self.step_duration:
+                    self.completed_steps.add(target_step)
+                    just_completed = True
+                    completed_step_name = target_step
+                    self.step_timer = 0.0
+                    self.active_step = None
                     self.current_step_idx += 1
                     if self.current_step_idx >= len(STEPS_ORDER):
                         self._finish_session()
-                else:
+            else:
+                if self.active_step is not None and self.step_timer > 0:
+                    self.grace_timer += dt
+                    if self.grace_timer > self.error_tolerance:
+                        self.step_timer = max(0.0, self.step_timer - dt * 2.0)
+                        if self.step_timer == 0.0:
+                            self.active_step = None
+        else:  # "free" mode: user can perform any of the 7 steps in random/arbitrary order
+            if detected_label in STEPS_ORDER and detected_label not in self.completed_steps:
+                self.active_step = detected_label
+                self.step_times[detected_label] += dt
+                self.step_timer = self.step_times[detected_label]
+                self.grace_timer = 0.0
+
+                if self.step_times[detected_label] >= self.step_duration:
+                    self.completed_steps.add(detected_label)
+                    just_completed = True
+                    completed_step_name = detected_label
+                    self.step_timer = 0.0
+                    self.active_step = None
+
                     if len(self.completed_steps) >= len(STEPS_ORDER):
                         self._finish_session()
-        else:
-            # Tolerant decay when action temporarily flickers
-            if self.active_step is not None and self.step_timer > 0:
-                self.grace_timer += dt
-                if self.grace_timer > self.error_tolerance:
-                    self.step_timer = max(0.0, self.step_timer - dt * 2.0)
-                    if self.step_timer == 0.0:
+            else:
+                if self.active_step is not None:
+                    self.grace_timer += dt
+                    if self.grace_timer > self.error_tolerance:
                         self.active_step = None
 
         return just_completed, completed_step_name
@@ -144,12 +155,17 @@ class WashHandStateMachine:
             total_time = max(0.0, end - self.start_time)
 
         current_step_progress = min(1.0, self.step_timer / self.step_duration) if self.step_duration > 0 else 0.0
+        step_progresses = {
+            step: (1.0 if step in self.completed_steps else min(1.0, self.step_times[step] / self.step_duration))
+            for step in STEPS_ORDER
+        }
 
         return {
             "mode": self.mode,
             "target_step": self._get_target_step(),
             "active_step": self.active_step,
             "current_step_progress": current_step_progress,
+            "step_progresses": step_progresses,
             "step_timer": self.step_timer,
             "step_duration": self.step_duration,
             "completed_steps": list(self.completed_steps),

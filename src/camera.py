@@ -26,14 +26,54 @@ class Camera:
             self._is_synthetic = True
             return True
 
-        self.cap = cv2.VideoCapture(self.source)
-        if not self.cap.isOpened():
-            return False
+        if isinstance(self.source, str) and not str(self.source).isdigit():
+            # Video file path
+            self.cap = cv2.VideoCapture(self.source)
+            return self.cap.isOpened()
 
-        if isinstance(self.source, int):
+        # WebCam index probing (with AVFoundation on macOS)
+        import platform
+        is_macos = (platform.system() == "Darwin")
+        backend = cv2.CAP_AVFOUNDATION if is_macos else cv2.CAP_ANY
+
+        preferred_idx = int(self.source)
+        # Probe preferred index first, then fallback to other common indices (0, 1, 2)
+        indices_to_try = [preferred_idx] + [i for i in [0, 1, 2] if i != preferred_idx]
+
+        for idx in indices_to_try:
+            try:
+                cap = cv2.VideoCapture(idx, backend)
+            except Exception:
+                cap = cv2.VideoCapture(idx)
+
+            if cap.isOpened():
+                # Test read a frame and verify it is not all black/zeros
+                ret, frame = False, None
+                for _ in range(3):  # warm-up capture
+                    ret, frame = cap.read()
+                    if ret and frame is not None:
+                        break
+
+                if ret and frame is not None and np.mean(frame) > 0.5:
+                    self.cap = cap
+                    self.source = idx
+                    if is_macos:
+                        print(f"[*] 成功啟用 macOS 鏡頭 (Device Index: {idx}, AVFoundation, 解析度: {frame.shape[1]}x{frame.shape[0]})")
+                    else:
+                        print(f"[*] 成功啟用 WebCam 鏡頭 (Device Index: {idx})")
+                    return True
+                else:
+                    # Device opened but returned blank/black frame
+                    cap.release()
+
+        # Fallback: try opening preferred index directly with default backend
+        self.cap = cv2.VideoCapture(preferred_idx)
+        if self.cap.isOpened():
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        return True
+            return True
+
+        return False
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
         if self._is_synthetic:

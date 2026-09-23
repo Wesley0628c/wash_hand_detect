@@ -29,7 +29,7 @@ class RealtimeWashHandDetector:
         self,
         mode: str = "hybrid",
         model_path: str = "models/wash_hand_xgb.joblib",
-        guide_mode: str = "sequence",
+        guide_mode: str = "free",  # "free" (arbitrary random order) or "sequence" (strict sequential order)
         step_duration: float = 2.0,
         window_sec: float = 0.5,
         source: Any = 0,
@@ -169,7 +169,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Real-time Wash Hand Detection Application via WebCam")
     parser.add_argument("--mode", type=str, default="hybrid", choices=["hybrid", "ml", "rule"], help="Classifier mode")
     parser.add_argument("--model-path", type=str, default="models/wash_hand_xgb.joblib", help="Path to trained XGBoost model")
-    parser.add_argument("--guide-mode", type=str, default="sequence", choices=["sequence", "free"], help="Guide flow mode")
+    parser.add_argument("--guide-mode", type=str, default="free", choices=["free", "sequence"], help="Guide flow mode (free: random order, sequence: strict order)")
     parser.add_argument("--step-duration", type=float, default=2.0, help="Seconds required per step")
     parser.add_argument("--window-sec", type=float, default=0.5, help="Sliding window seconds for probability integration")
     parser.add_argument("--camera", default=0, help="WebCam index (0, 1, 2) or video file path")

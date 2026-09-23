@@ -141,6 +141,26 @@ def test_state_machine_free_mode():
     assert len(sm.completed_steps) == 7
 
 
+def test_random_arbitrary_order_washing():
+    sm = WashHandStateMachine(mode="free", step_duration=0.6)
+    
+    # Shuffle order: e.g. wrist -> thumb -> inside -> knuckles -> fingertips -> outside -> interlace
+    random_order = ["wrist", "thumb", "inside", "knuckles", "fingertips", "outside", "interlace"]
+    
+    for step in random_order:
+        # Check that step is not yet completed
+        assert step not in sm.completed_steps
+        # Perform step in 3 chunks of 0.25s (total 0.75s >= 0.6s)
+        for _ in range(3):
+            sm.update(step, 0.25)
+        assert step in sm.completed_steps
+    
+    assert sm.is_completed is True
+    summary = sm.get_progress_summary()
+    assert summary["completed_count"] == 7
+    assert all(summary["step_progresses"][s] == 1.0 for s in STEPS_ORDER)
+
+
 def test_lstm_model_building_and_synthetic_training():
     model = build_lstm_model(seq_len=30, feature_dim=160, num_classes=8)
     assert model.input_shape == (None, 30, 160)

@@ -19,13 +19,31 @@
   160 維幾何特徵 + 15 幀滑動窗口統計量 (960 維) + Landmark Dropout 泡沫資料增強 + Hybrid 幾何融合 + 視覺化影片評估匯出
       │
       ▼
-[V3.1.0 CLAHE 泡沫對比強化與 WebCam 完整即時測試] (現行最新版本)
-  CLAHE 自適應直方圖均衡化 (強化泡沫指節邊緣) + WebCam 即時串流引擎 (支援鏡像/快捷鍵切換) + 完整即時體驗
-```
+[V3.1.0 CLAHE 泡沫對比強化與 WebCam 即時測試]
+  CLAHE 自適應直方圖均衡化 + WebCam 即時串流引擎 (支援鏡像/快捷鍵切換)
+      │
+      ▼
+[V3.2.0 鏡頭自動探測修復 & 支援任意隨機順序洗手 (Free Mode)] (現行最新版本)
+  macOS AVFoundation 鏡頭自動探測 (解決黑畫面) + 預設自由模式 (隨機/任意順序 7 步洗手獨立累積) + 獨立進度條 HUD
 
 ---
 
-## 🚀 [V3.1.0] - 2026-09-23 (現行最新版)
+## 🚀 [V3.2.0] - 2026-09-23 (現行最新版)
+
+### 🌟 新增功能與重大修正 (Features & Bug Fixes)
+1. **macOS WebCam 鏡頭自動探測與 AVFoundation 支援 (`src/camera.py`)**：
+   - 修正 macOS 上因預設後端或虛擬鏡頭裝置佔用 Index 0（輸出全黑畫面/亮度 0）導致預覽黑屏之問題。
+   - 自動調用 `cv2.CAP_AVFOUNDATION` 驅動，並實作多裝置 Index (0, 1, 2) 自動探測與有效畫面亮度驗證 (`mean_brightness > 0.5`)，秒級切換至可用之 FaceTime HD / WebCam 鏡頭。
+2. **預設自由模式（支援任意/隨機洗手順序）(`src/state_machine.py` & `src/realtime.py`)**：
+   - 系統預設導引模式改為 **自由模式 (`guide_mode="free"`)**，打破嚴格循序限制。
+   - 使用者可以任意順序進行七步中的任何一步（例如先洗「腕」或先洗「弓」），系統自動動態辨識當前手勢並獨立累加該步驟的秒數（預設 2.0 秒達標）。
+   - HUD 面板全面升級：七個項目各自擁有獨立動態進度條，即時呈現各步驟累積進度；當全部 7 步完成即自動彈出完成結算視窗！
+3. **擴充單元測試套件 (`tests/test_pipeline.py`)**：
+   - 新增 `test_random_arbitrary_order_washing` 單元測試，測試項目增至 **12/12 全數通過**。
+
+---
+
+## 🚀 [V3.1.0] - 2026-09-23
 
 ### 🌟 新增功能與優化 (Features & Optimizations)
 1. **CLAHE 泡沫邊緣自適應對比度強化 (`src/hand_detector.py`)**：
