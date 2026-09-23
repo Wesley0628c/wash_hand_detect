@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# System
+.DS_Store
+Thumbs.db
+
+# Large / Generated data & models (keep folder structure)
+data/processed/*.npy
+!data/processed/.gitkeep
+data/raw/*
+!data/raw/.gitkeep
+models/*.task
+!models/.gitkeep
