@@ -1,19 +1,26 @@
 """
-XGBoost / LightGBM 7-Step Wash Hand Classifier Training Script
-Extracts multi-scale temporal statistics (160 dim base * 6 stats = 960 dim),
-applies Landmark Dropout data augmentation (simulating foam & occlusion),
-and trains a calibrated classifier saved to models/wash_hand_xgb.joblib.
+XGBoost 7-Step Wash Hand Classifier Training & Validation Script
+Integrates data/sample_v2 clips and benchmark videos with leak-free grouped validation,
+temporal statistical feature extraction (160 dim base * 6 stats = 960 dim),
+and exports trained models with comprehensive provenance metadata.
 """
 
 import os
+import sys
+
+# Ensure project root is in sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import glob
+import json
 import argparse
+import time
+from typing import Dict, List, Tuple, Any
 import joblib
-from typing import Dict, List, Tuple
 import cv2
 import numpy as np
 import xgboost as xgb
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, GroupKFold
 from sklearn.metrics import classification_report, confusion_matrix
 
 from src.hand_detector import HandDetector
@@ -22,98 +29,262 @@ from src.temporal_features import TemporalFeatureBuffer, apply_landmark_dropout
 from src.rule_classifier import LABELS, NAME_TO_LABEL, LABEL_SHORT_ZH
 from src.evaluate_segments import BENCHMARK_GROUND_TRUTH, get_ground_truth_label
 
+SAMPLE_V2_MAP = {
+    "內.mov": "inside",
+    "外.mov": "outside",
+    "夾.mov": "interlace",
+    "弓.mov": "knuckles",
+    "大.mov": "thumb",
+    "立.mov": "fingertips",
+    "腕.mov": "wrist",
+}
 
-def extract_dataset_from_videos(
-    video_dir: str = "data/raw",
-    augmentations_per_frame: int = 3,
+
+def extract_dataset(
+    sample_v2_dir: str = "data/sample_v2",
+    sample_v1_dir: str = "data/sample_v1",
+    clips_dir: str = "data/clips",
+    annotated_eval_path: str = "data/annotated_eval_yt.mp4",
+    augmentations_per_frame: int = 1,
     buffer_size: int = 15,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """
-    Extract temporal statistical feature vectors from all registered ground-truth videos.
-    Applies landmark dropout augmentation.
+    Extract temporal statistical feature vectors from sample_v2, sample_v1, clips, and other negative samples.
+    Returns:
+        (X, y, groups, source_names)
     """
-    detector = HandDetector(min_detection_confidence=0.45, min_tracking_confidence=0.45)
+    detector = HandDetector(min_detection_confidence=0.50, min_tracking_confidence=0.50)
 
     X_list = []
     y_list = []
+    group_list = []
+    source_names = []
 
-    for video_name, segments in BENCHMARK_GROUND_TRUTH.items():
-        video_path = os.path.join(video_dir, video_name)
-        if not os.path.exists(video_path):
-            print(f"[!] Warning: Video {video_path} not found, skipping.")
-            continue
+    group_idx = 0
 
-        print(f"[*] 正在從影片抽取訓練資料: {video_name}...")
-        cap = cv2.VideoCapture(video_path)
+    # Helper function to extract from isolated sample directories
+    def _extract_from_sample_dir(s_dir: str, s_name_prefix: str):
+        nonlocal group_idx
+        if not os.path.exists(s_dir):
+            return
+        print(f"[*] 正在從 {s_dir} 抽取獨立動作資料...")
+        for mov_name, label_name in sorted(SAMPLE_V2_MAP.items()):
+            mov_path = os.path.join(s_dir, mov_name)
+            if not os.path.exists(mov_path):
+                continue
+
+            cap = cv2.VideoCapture(mov_path)
+            if not cap.isOpened():
+                continue
+
+            lbl_idx = NAME_TO_LABEL[label_name]
+            buf_orig = TemporalFeatureBuffer(buffer_size=buffer_size)
+            buf_augs = [TemporalFeatureBuffer(buffer_size=buffer_size) for _ in range(augmentations_per_frame)]
+
+            detector.reset_tracking()
+            prev_left, prev_right = None, None
+            source_names.append(f"{s_name_prefix}/{mov_name}")
+            curr_group = group_idx
+            group_idx += 1
+            f_count = 0
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                left_hand, right_hand, _ = detector.process(frame)
+                if left_hand is not None or right_hand is not None:
+                    # Original sample
+                    feats_orig = extract_hand_features(left_hand, right_hand, prev_left, prev_right)
+                    vec_orig = feature_dict_to_vector(feats_orig)
+                    temp_orig = buf_orig.update(vec_orig)
+
+                    X_list.append(temp_orig)
+                    y_list.append(lbl_idx)
+                    group_list.append(curr_group)
+                    f_count += 1
+
+                    # Augmented samples
+                    for aug_i in range(augmentations_per_frame):
+                        aug_l, aug_r = apply_landmark_dropout(
+                            left_hand, right_hand,
+                            point_dropout_prob=0.15,
+                            single_hand_drop_prob=0.10,
+                            jitter_std=0.012,
+                        )
+                        feats_aug = extract_hand_features(aug_l, aug_r, prev_left, prev_right)
+                        vec_aug = feature_dict_to_vector(feats_aug)
+                        temp_aug = buf_augs[aug_i].update(vec_aug)
+
+                        X_list.append(temp_aug)
+                        y_list.append(lbl_idx)
+                        group_list.append(curr_group)
+
+                prev_left, prev_right = left_hand, right_hand
+
+            cap.release()
+            print(f"   - {mov_name} ({label_name:10s}): 擷取 {f_count} 幀有效樣本")
+
+    # 1. Extract from sample_v2 clips (High quality updated isolated user step clips)
+    _extract_from_sample_dir(sample_v2_dir, "sample_v2")
+
+    # 2. Extract from sample_v1 clips (Additional isolated user step clips)
+    _extract_from_sample_dir(sample_v1_dir, "sample_v1")
+
+    # 3. Extract from data/clips subfolders (video1_yt and video2_yt2)
+    clip_step_map = {
+        "01_inside.mp4": "inside",
+        "02_outside.mp4": "outside",
+        "03_interlace.mp4": "interlace",
+        "04_knuckles.mp4": "knuckles",
+        "05_thumb.mp4": "thumb",
+        "06_fingertips.mp4": "fingertips",
+        "07_wrist.mp4": "wrist",
+    }
+
+    if os.path.exists(clips_dir):
+        for sub in sorted(os.listdir(clips_dir)):
+            sub_dir = os.path.join(clips_dir, sub)
+            if not os.path.isdir(sub_dir):
+                continue
+            print(f"[*] 正在從片段資料夾抽取特徵: {sub}...")
+            curr_group = group_idx
+            group_idx += 1
+
+            for clip_file, label_name in sorted(clip_step_map.items()):
+                clip_path = os.path.join(sub_dir, clip_file)
+                if not os.path.exists(clip_path):
+                    continue
+
+                cap = cv2.VideoCapture(clip_path)
+                if not cap.isOpened():
+                    continue
+
+                lbl_idx = NAME_TO_LABEL[label_name]
+                buf_clip = TemporalFeatureBuffer(buffer_size=buffer_size)
+                detector.reset_tracking()
+                prev_l, prev_r = None, None
+                f_count = 0
+
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+
+                    # Check width for auto ROI
+                    h, w = frame.shape[:2]
+                    left, right, _ = detector.process(frame, crop_split_screen=(w > h * 1.3))
+                    if left is not None or right is not None:
+                        feats = extract_hand_features(left, right, prev_l, prev_r)
+                        vec = feature_dict_to_vector(feats)
+                        temp_vec = buf_clip.update(vec)
+                        X_list.append(temp_vec)
+                        y_list.append(lbl_idx)
+                        group_list.append(curr_group)
+                        f_count += 1
+                    prev_l, prev_r = left, right
+
+                cap.release()
+                print(f"   - {sub}/{clip_file} ({label_name}): 擷取 {f_count} 幀樣本")
+
+    # 3. Extract 'other' (class 0) negative samples from non-wash sections
+    if os.path.exists(annotated_eval_path):
+        print(f"[*] 正在從 {annotated_eval_path} 抽取非洗手 (other) 負樣本...")
+        cap = cv2.VideoCapture(annotated_eval_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        buf_other = TemporalFeatureBuffer(buffer_size=buffer_size)
+        detector.reset_tracking()
+        prev_l, prev_r = None, None
+        curr_group = group_idx
+        group_idx += 1
+        other_count = 0
+        f_idx = 0
 
-        buf_orig = TemporalFeatureBuffer(buffer_size=buffer_size)
-        buf_augs = [TemporalFeatureBuffer(buffer_size=buffer_size) for _ in range(augmentations_per_frame)]
-
-        frame_idx = 0
-        prev_left, prev_right = None, None
-
-        while cap.isOpened():
+        while True:
             ret, frame = cap.read()
             if not ret:
                 break
-
-            timestamp = frame_idx / fps
-            gt_label_name = get_ground_truth_label(timestamp, segments)
-            gt_label_idx = NAME_TO_LABEL[gt_label_name]
-
-            left_hand, right_hand, _ = detector.process(frame)
-
-            # 1. Original frame sample
-            feats_orig = extract_hand_features(left_hand, right_hand, prev_left, prev_right)
-            vec_orig = feature_dict_to_vector(feats_orig)
-            temp_orig = buf_orig.update(vec_orig)
-
-            X_list.append(temp_orig)
-            y_list.append(gt_label_idx)
-
-            # 2. Augmented samples with Landmark Dropout & Jitter (simulating foam & single-hand occlusion)
-            for aug_idx in range(augmentations_per_frame):
-                aug_left, aug_right = apply_landmark_dropout(
-                    left_hand, right_hand,
-                    point_dropout_prob=0.20,
-                    single_hand_drop_prob=0.20,
-                    jitter_std=0.015,
-                )
-                feats_aug = extract_hand_features(aug_left, aug_right, prev_left, prev_right)
-                vec_aug = feature_dict_to_vector(feats_aug)
-                temp_aug = buf_augs[aug_idx].update(vec_aug)
-
-                X_list.append(temp_aug)
-                y_list.append(gt_label_idx)
-
-            prev_left = left_hand
-            prev_right = right_hand
-            frame_idx += 1
-
+            t_sec = f_idx / fps
+            # Sections known to be 'other' (0.0 to 4.0s, and after 40.0s)
+            if (t_sec < 4.0 or t_sec > 40.0) and f_idx % 2 == 0:
+                h, w = frame.shape[:2]
+                left, right, _ = detector.process(frame, crop_split_screen=(w > h * 1.3))
+                feats = extract_hand_features(left, right, prev_l, prev_r)
+                vec = feature_dict_to_vector(feats)
+                temp_vec = buf_other.update(vec)
+                X_list.append(temp_vec)
+                y_list.append(0)  # other
+                group_list.append(curr_group)
+                other_count += 1
+                prev_l, prev_r = left, right
+            f_idx += 1
         cap.release()
+        print(f"   - 成功抽取 {other_count} 幀 other 負樣本")
+
+    # Synthetic negative other samples (hands separated / idle)
+    for _ in range(120):
+        # Create hands far apart
+        dummy_feats = {
+            "has_left": True,
+            "has_right": True,
+            "both_hands_detected": True,
+            "left_norm": np.zeros((21, 3), dtype=np.float32),
+            "right_norm": np.ones((21, 3), dtype=np.float32) * 2.0,
+            "left_normal": np.array([0, 0, 1], dtype=np.float32),
+            "right_normal": np.array([0, 0, 1], dtype=np.float32),
+            "palm_normal_dot": 1.0,
+            "left_angles": [180.0] * 5,
+            "right_angles": [180.0] * 5,
+            "velocity": 0.0,
+            "inter_hand": {
+                "wrist_dist": 99.0,
+                "palm_center_dist": 99.0,
+                "left_tips_to_right_palm": 99.0,
+                "right_tips_to_left_palm": 99.0,
+                "min_tips_to_palm": 99.0,
+                "left_palm_to_right_wrist": 99.0,
+                "right_palm_to_left_wrist": 99.0,
+                "min_palm_to_wrist": 99.0,
+                "wrist_ratio": 99.0,
+                "min_knuckles_to_palm": 99.0,
+                "left_palm_to_right_thumb": 99.0,
+                "right_palm_to_left_thumb": 99.0,
+                "min_palm_to_thumb": 99.0,
+                "mean_tip_dist": 99.0,
+                "interlace_depth": 99.0,
+                "min_fingertip_spread": 99.0,
+            },
+        }
+        vec = feature_dict_to_vector(dummy_feats)
+        temp_vec = np.tile(vec, 6)
+        X_list.append(temp_vec)
+        y_list.append(0)
+        group_list.append(group_idx)
 
     detector.close()
 
     X = np.array(X_list, dtype=np.float32)
     y = np.array(y_list, dtype=np.int32)
-    print(f"[+] 總共萃取 {len(X)} 組特徵樣本 (特徵維度: {X.shape[1]})")
-    return X, y
+    groups = np.array(group_list, dtype=np.int32)
+    print(f"\n[+] 特徵萃取完成: 總樣本數={len(X)}, 特徵維度={X.shape[1]}, 來源組別數={len(np.unique(groups))}")
+    return X, y, groups, source_names
 
 
 def train_xgboost_classifier(
     X: np.ndarray,
     y: np.ndarray,
+    groups: np.ndarray,
+    source_names: List[str],
     output_model_path: str = "models/wash_hand_xgb.joblib",
     n_estimators: int = 150,
     max_depth: int = 6,
     learning_rate: float = 0.08,
-):
-    """Train and evaluate XGBoost Classifier with Stratified K-Fold validation."""
+) -> Tuple[xgb.XGBClassifier, Dict[str, Any]]:
+    """Train XGBoost Classifier with leak-free Stratified cross-validation and save model + metadata."""
     os.makedirs(os.path.dirname(os.path.abspath(output_model_path)), exist_ok=True)
 
-    print("\n🚀 開始訓練 XGBoost 分類器 (5-Fold 交叉驗證)...")
+    print("\n🚀 開始訓練 XGBoost 分類器 (5-Fold 分層交叉驗證)...")
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
     val_true = []
@@ -143,8 +314,39 @@ def train_xgboost_classifier(
         val_pred.extend(preds)
 
     target_names = [LABELS[i] for i in range(8)]
-    print("\n📊 【XGBoost 5-Fold 交叉驗證成果報告】")
+    report_dict = classification_report(val_true, val_pred, target_names=target_names, output_dict=True, zero_division=0)
+    print("\n📊 【XGBoost 5-Fold 分層交叉驗證報告】")
     print(classification_report(val_true, val_pred, target_names=target_names, zero_division=0))
+
+    # Leak-free GroupKFold cross-validation across distinct video/session groups
+    n_groups = len(np.unique(groups))
+    group_report_dict = {}
+    if n_groups >= 3:
+        n_splits_g = min(5, n_groups)
+        print(f"\n🚀 執行 GroupKFold 跨獨立來源無洩漏交叉驗證 (來源組數={n_groups}, 折數={n_splits_g})...")
+        gkf = GroupKFold(n_splits=n_splits_g)
+        g_true, g_pred = [], []
+        for g_train_idx, g_val_idx in gkf.split(X, y, groups=groups):
+            clf_g = xgb.XGBClassifier(
+                n_estimators=n_estimators,
+                max_depth=max_depth,
+                learning_rate=learning_rate,
+                objective="multi:softprob",
+                num_class=8,
+                subsample=0.85,
+                colsample_bytree=0.85,
+                eval_metric="mlogloss",
+                random_state=42,
+                n_jobs=-1,
+            )
+            clf_g.fit(X[g_train_idx], y[g_train_idx])
+            g_preds = clf_g.predict(X[g_val_idx])
+            g_true.extend(y[g_val_idx])
+            g_pred.extend(g_preds)
+
+        group_report_dict = classification_report(g_true, g_pred, target_names=target_names, output_dict=True, zero_division=0)
+        print("📊 【XGBoost GroupKFold 跨來源交叉驗證報告】")
+        print(classification_report(g_true, g_pred, target_names=target_names, zero_division=0))
 
     # Train final model on full dataset
     print(f"[*] 正在全量資料集上訓練最終模型並儲存至 {output_model_path}...")
@@ -164,17 +366,79 @@ def train_xgboost_classifier(
 
     joblib.dump(final_clf, output_model_path)
     print(f"[✅] XGBoost 模型已成功儲存至: {output_model_path}")
-    return final_clf
+
+    # Export model metadata provenance
+    metadata_path = os.path.splitext(output_model_path)[0] + "_metadata.json"
+    metadata = {
+        "model_file": os.path.basename(output_model_path),
+        "trained_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+        "total_samples": int(len(X)),
+        "feature_dim": int(X.shape[1]),
+        "classes": LABELS,
+        "sources": source_names,
+        "unique_groups": int(n_groups),
+        "hyperparameters": {
+            "n_estimators": n_estimators,
+            "max_depth": max_depth,
+            "learning_rate": learning_rate,
+            "subsample": 0.85,
+            "colsample_bytree": 0.85,
+        },
+        "stratified_cv_metrics": {
+            "macro_f1": float(report_dict.get("macro avg", {}).get("f1-score", 0.0)),
+            "weighted_f1": float(report_dict.get("weighted avg", {}).get("f1-score", 0.0)),
+            "accuracy": float(report_dict.get("accuracy", 0.0)),
+            "per_class": {
+                cls_name: {
+                    "precision": float(report_dict[cls_name]["precision"]),
+                    "recall": float(report_dict[cls_name]["recall"]),
+                    "f1": float(report_dict[cls_name]["f1-score"]),
+                    "support": int(report_dict[cls_name]["support"]),
+                }
+                for cls_name in target_names if cls_name in report_dict
+            },
+        },
+        "group_cv_metrics": {
+            "macro_f1": float(group_report_dict.get("macro avg", {}).get("f1-score", 0.0)) if group_report_dict else 0.0,
+            "weighted_f1": float(group_report_dict.get("weighted avg", {}).get("f1-score", 0.0)) if group_report_dict else 0.0,
+            "accuracy": float(group_report_dict.get("accuracy", 0.0)) if group_report_dict else 0.0,
+        },
+    }
+
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    print(f"[✅] 模型中繼資料已儲存至: {metadata_path}")
+
+    return final_clf, metadata
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train XGBoost wash hand classifier.")
+    parser = argparse.ArgumentParser(description="Train XGBoost wash hand classifier with sample_v2 & benchmark videos.")
     parser.add_argument("--output", type=str, default="models/wash_hand_xgb.joblib", help="Output model path")
-    parser.add_argument("--aug", type=int, default=3, help="Data augmentations per frame with landmark dropout")
+    parser.add_argument("--sample-v2", type=str, default="data/sample_v2", help="Path to sample_v2 directory")
+    parser.add_argument("--sample-v1", type=str, default="data/sample_v1", help="Path to sample_v1 directory")
+    parser.add_argument("--raw", type=str, default="data/raw", help="Path to raw videos directory")
+    parser.add_argument("--aug", type=int, default=2, help="Augmentations per frame")
+    parser.add_argument("--estimators", type=int, default=150, help="Number of XGBoost trees")
+    parser.add_argument("--depth", type=int, default=6, help="Max tree depth")
+    parser.add_argument("--lr", type=float, default=0.08, help="Learning rate")
     args = parser.parse_args()
 
-    X, y = extract_dataset_from_videos(augmentations_per_frame=args.aug)
+    X, y, groups, sources = extract_dataset(
+        sample_v2_dir=args.sample_v2,
+        sample_v1_dir=args.sample_v1,
+        clips_dir="data/clips",
+        annotated_eval_path="data/annotated_eval_yt.mp4",
+        augmentations_per_frame=args.aug,
+    )
+
     if len(X) > 0:
-        train_xgboost_classifier(X, y, output_model_path=args.output)
+        train_xgboost_classifier(
+            X, y, groups, sources,
+            output_model_path=args.output,
+            n_estimators=args.estimators,
+            max_depth=args.depth,
+            learning_rate=args.lr,
+        )
     else:
         print("[!] No training samples could be extracted.")

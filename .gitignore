@@ -25,5 +25,8 @@ data/processed/*.npy
 !data/processed/.gitkeep
 data/raw/*
 !data/raw/.gitkeep
+data/sample_v1/*.mov
+data/sample_v2/*.mov
 models/*.task
 !models/.gitkeep
+

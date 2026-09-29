@@ -136,19 +136,12 @@ class WashHandHUD:
         action_color = (100, 255, 160) if detected_label in STEPS_ORDER else (200, 210, 225)
         draw.text((banner_x + 22, banner_y + 12), f"當前動作：【 {curr_zh} 】", fill=action_color, font=self.font_lg)
 
-        # Confidence Bar
-        conf_pct = int(max(0.0, min(1.0, confidence)) * 100)
-        draw.text((banner_x + 420, banner_y + 16), f"信心度：{conf_pct}%", fill=(100, 220, 255), font=self.font_md)
-
-        # Mini confidence progress bar
-        cbar_x = banner_x + 560
-        cbar_y = banner_y + 22
-        cbar_w = min(180, w - cbar_x - 30)
-        if cbar_w > 50:
-            draw.rectangle([cbar_x, cbar_y, cbar_x + cbar_w, cbar_y + 12], fill=(45, 55, 70))
-            fill_w = int(cbar_w * (conf_pct / 100.0))
-            bar_color = (0, 220, 140) if conf_pct >= 60 else (255, 180, 50)
-            draw.rectangle([cbar_x, cbar_y, cbar_x + fill_w, cbar_y + 12], fill=bar_color)
+        # Completed Steps Count indicator in card (if available)
+        if progress_summary is not None:
+            done_cnt = progress_summary.get("completed_count", 0)
+            total_cnt = progress_summary.get("total_steps", 7)
+            status_summary_str = f"洗手進度：{done_cnt}/{total_cnt} 步"
+            draw.text((banner_x + banner_w - 200, banner_y + 16), status_summary_str, fill=(180, 215, 255), font=self.font_md)
 
         # Real-time Feedback Hint
         draw.text((banner_x + 24, banner_y + 48), f"指導提示：{feedback_msg}", fill=(255, 215, 120), font=self.font_sm)

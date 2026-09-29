@@ -5,18 +5,18 @@ Runs the Wash Hand Detection Pipeline on a video file with 1.0s Windowed Maximum
 
 import os
 import sys
+
+# Ensure project root is in sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 import time
 import cv2
 import numpy as np
 from collections import Counter
 
-from src.hand_detector import HandDetector
-from src.features import extract_hand_features, feature_dict_to_vector
-from src.ml_classifier import WashHandMLClassifier
-from src.rule_classifier import WashHandRuleClassifier, LABEL_NAMES_ZH, LABELS, FEEDBACK_ZH
-from src.accumulator import TemporalProbabilityAccumulator
-from src.state_machine import WashHandStateMachine
+from src.pipeline import WashHandPipeline, PipelineConfig
+from src.rule_classifier import LABEL_NAMES_ZH, LABELS, FEEDBACK_ZH
 from src.ui import WashHandHUD
 
 
@@ -28,16 +28,16 @@ def evaluate_video(
     step_duration: float = 1.0,
     window_sec: float = 0.5,
     max_frames: int = 1500,
-    roi_mode: str = "auto",
+    roi_mode: str = "none",
     show_window: bool = False,
 ):
     if not os.path.exists(video_path):
-        print(f"[!] Video file not found: {video_path}")
+        print(f"[!] 找不到影片檔案: {video_path}")
         return
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"[!] Could not open video: {video_path}")
+        print(f"[!] 無法開啟影片: {video_path}")
         return
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -51,15 +51,20 @@ def evaluate_video(
     print(f"🎬 測試影片: {video_path}")
     print(f"   解析度: {width}x{height} | FPS: {fps:.1f} | 總幀數: {total_frames}")
     print(f"   模型類型: {model_type.upper()} | 決策窗口: {window_sec} 秒")
-    print(f"   ROI 模式: {roi_mode} ({'啟用右側子母畫面裁切' if use_right_roi else '全畫面模式'})")
+    print(f"   ROI 模式: {roi_mode} ({'啟用右側子母畫面裁切' if use_right_roi else '全畫面模式 (Full-Frame)'})")
     print(f"=======================================================")
 
-    detector = HandDetector(max_num_hands=2, min_detection_confidence=0.5, min_tracking_confidence=0.5)
-    ml_classifier = WashHandMLClassifier(model_path="models/wash_hand_xgb.joblib", hybrid_with_rules=(model_type == "hybrid"))
-    rule_classifier = WashHandRuleClassifier()
-    accumulator = TemporalProbabilityAccumulator(window_sec=window_sec, margin_threshold=0.12)
-    state_machine = WashHandStateMachine(mode=guide_mode, step_duration=step_duration)
-    state_machine.start()
+    pipeline_cfg = PipelineConfig(
+        model_type=model_type,
+        model_path="models/wash_hand_xgb.joblib",
+        crop_split_screen=use_right_roi,
+        window_sec=window_sec,
+        margin_threshold=0.12,
+        consecutive_frames_required=2,
+        guide_mode=guide_mode,
+        step_duration=step_duration,
+    )
+    pipeline = WashHandPipeline(pipeline_cfg)
 
     writer = None
     if output_annotated_path:
@@ -67,12 +72,13 @@ def evaluate_video(
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(output_annotated_path, fourcc, fps, (width, height))
 
-    prev_left, prev_right = None, None
-    detected_frames = 0
     predictions = Counter()
+    observed_predictions = Counter()
+    hand_count_stats = Counter()  # 0, 1, 2 observed hands
+    ghost_frames_count = 0
+
     start_time = time.time()
     frame_idx = 0
-
     hud = WashHandHUD()
 
     while True:
@@ -84,49 +90,44 @@ def evaluate_video(
         dt = 1.0 / fps
         simulated_time = frame_idx * dt
 
-        canvas = frame.copy()
+        # Process through standardized pipeline
+        res, mediapipe_results = pipeline.process_frame(
+            frame, timestamp_sec=simulated_time, crop_split_screen=use_right_roi
+        )
 
+        # Track hand observation statistics
+        n_obs = res.num_hands_observed
+        hand_count_stats[n_obs] += 1
+        if res.hand_status.get("left") == "held" or res.hand_status.get("right") == "held":
+            ghost_frames_count += 1
+
+        predictions[res.display_label] += 1
+        observed_predictions[res.observed_label] += 1
+
+        # Visualization
         if use_right_roi:
             xmin = int(width * 0.42)
-            roi = frame[:, xmin:].copy()
-            left_hand, right_hand, results = detector.process(roi)
-            # Draw skeleton directly on ROI, then composite back into canvas
-            roi_annotated = detector.draw_hands(roi, results)
-            canvas[:, xmin:] = roi_annotated
+            canvas = frame.copy()
             cv2.rectangle(canvas, (xmin, 0), (width, height), (0, 255, 0), 2)
             cv2.putText(canvas, "[ROI Area]", (xmin + 15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            annotated = pipeline.detector.draw_hands(canvas, mediapipe_results)
         else:
-            left_hand, right_hand, results = detector.process(frame)
-            canvas = detector.draw_hands(canvas, results)
+            annotated = pipeline.detector.draw_hands(frame.copy(), mediapipe_results)
 
-        if left_hand is not None or right_hand is not None:
-            detected_frames += 1
-            features = extract_hand_features(left_hand, right_hand, prev_left, prev_right)
-            if model_type in ["hybrid", "ml"]:
-                frame_probs = ml_classifier.predict_probabilities(features)
-            else:
-                frame_probs = rule_classifier.predict_probabilities(features)
-        else:
-            frame_probs = {k: 0.01 for k in LABELS.values()}
-            frame_probs["other"] = 0.93
-
-        # Windowed winner-take-all probability integration
-        label, conf, integrated_probs = accumulator.update(frame_probs, timestamp=simulated_time)
-        state_machine.update(label, dt=dt)
-        predictions[label] += 1
-
-        prev_left, prev_right = left_hand, right_hand
-
-        feedback_msg = FEEDBACK_ZH.get(label, "動作調整中")
-        hands_status = {"left": left_hand is not None, "right": right_hand is not None}
+        hands_status = {
+            "left": res.hand_status.get("left") == "observed",
+            "right": res.hand_status.get("right") == "observed",
+        }
+        progress_summary = pipeline.state_machine.get_progress_summary()
         annotated = hud.draw_hud(
-            frame=canvas,
-            detected_label=label,
-            confidence=conf,
-            feedback_msg=feedback_msg,
+            frame=annotated,
+            detected_label=res.display_label,
+            confidence=res.confidence,
+            feedback_msg=res.feedback_msg,
             fps=fps,
             mode_str=f"{model_type.upper()} | Win: {window_sec}s",
             hands_status=hands_status,
+            progress_summary=progress_summary,
         )
 
         if writer:
@@ -150,38 +151,57 @@ def evaluate_video(
         cv2.destroyAllWindows()
 
     elapsed = time.time() - start_time
-    summary = state_machine.get_progress_summary()
+    summary = pipeline.state_machine.get_progress_summary()
+
+    # Detailed Hand Detection & Tracking Analysis
+    obs_0 = hand_count_stats[0]
+    obs_1 = hand_count_stats[1]
+    obs_2 = hand_count_stats[2]
+    at_least_one = obs_1 + obs_2
 
     print(f"\n📊 【評估成果統計】")
     print(f"   總處理幀數: {frame_idx} 幀 (耗時: {elapsed:.2f}s, 平均速度: {frame_idx/max(0.001, elapsed):.1f} FPS)")
-    print(f"   雙手偵測率: {detected_frames}/{frame_idx} ({(detected_frames/max(1,frame_idx))*100:.1f}%)")
-    print(f"\n🖐️ 【時序積分決策後的動作分布】")
+    print(f"   ── 手部真實觀測分佈 ──")
+    print(f"   - 0 隻手 (未檢出): {obs_0} 幀 ({(obs_0/max(1,frame_idx))*100:.1f}%)")
+    print(f"   - 1 隻手 (單手觀測): {obs_1} 幀 ({(obs_1/max(1,frame_idx))*100:.1f}%)")
+    print(f"   - 2 隻手 (雙手同時): {obs_2} 幀 ({(obs_2/max(1,frame_idx))*100:.1f}%)")
+    print(f"   - 手部偵測率 (至少單手): {at_least_one}/{frame_idx} ({(at_least_one/max(1,frame_idx))*100:.1f}%)")
+    print(f"   - 真正雙手偵測率 (雙手同時): {obs_2}/{frame_idx} ({(obs_2/max(1,frame_idx))*100:.1f}%)")
+    print(f"   - 歷史狀態保留 (Ghost Held): {ghost_frames_count} 幀 ({(ghost_frames_count/max(1,frame_idx))*100:.1f}%)")
+
+    print(f"\n🖐️ 【時序平滑後的動作分布 (顯示標籤)】")
     for act, cnt in predictions.most_common():
         zh = LABEL_NAMES_ZH.get(act, act)
-        print(f"   - {zh} ({act}): {cnt} 幀 ({(cnt/max(1,frame_idx))*100:.1f}%)")
+        print(f"   - {zh:8s} ({act:12s}): {cnt:5d} 幀 ({(cnt/max(1,frame_idx))*100:.1f}%)")
+
+    print(f"\n⏱️ 【可靠真實觀測下的動作分布 (排除無當前證據)】")
+    for act, cnt in observed_predictions.most_common():
+        zh = LABEL_NAMES_ZH.get(act, act)
+        print(f"   - {zh:8s} ({act:12s}): {cnt:5d} 幀 ({(cnt/max(1,frame_idx))*100:.1f}%)")
 
     print(f"\n🏆 【七步洗手完成狀態】")
     for step_name in ["inside", "outside", "interlace", "knuckles", "thumb", "fingertips", "wrist"]:
-        time_spent = summary["step_times"].get(step_name, 0.0)
+        obs_time = summary.get("observed_times", {}).get(step_name, 0.0)
+        total_time = summary["step_times"].get(step_name, 0.0)
         is_done = step_name in summary["completed_steps"]
-        status = f"✅ 已達標 ({time_spent:.1f}s)" if is_done else f"⏳ 累積時間: {time_spent:.1f}s / {step_duration}s"
+        status = f"✅ 已達標 (可靠觀測: {obs_time:.1f}s / 總計: {total_time:.1f}s)" if is_done else f"⏳ 累積可靠時間: {obs_time:.1f}s / {step_duration}s"
         zh = LABEL_NAMES_ZH.get(step_name, step_name)
         print(f"   - {zh}: {status}")
 
-    print(f"   完成數: {summary['completed_count']}/{summary['total_steps']}")
+    print(f"   完成步驟數: {summary['completed_count']}/{summary['total_steps']}")
     print(f"   總體狀態: {'🎉 全部步驟完成！' if summary['is_completed'] else '進行中'}")
     print(f"=======================================================\n")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate video with Wash Hand Detector")
-    parser.add_argument("--video", type=str, default="data/raw/wash_7steps_yt.mp4", help="Path to input video")
+    parser = argparse.ArgumentParser(description="Evaluate video with Wash Hand Detector Pipeline")
+    parser.add_argument("--video", type=str, default="data/annotated_eval_yt.mp4", help="Path to input video")
     parser.add_argument("--output", type=str, default=None, help="Optional output annotated video path")
     parser.add_argument("--model-type", type=str, default="hybrid", choices=["hybrid", "ml", "rule"])
     parser.add_argument("--guide-mode", type=str, default="free", choices=["free", "sequence"])
     parser.add_argument("--step-duration", type=float, default=1.0)
     parser.add_argument("--window-sec", type=float, default=0.5)
-    parser.add_argument("--roi", type=str, default="auto", choices=["auto", "right", "none"])
+    parser.add_argument("--roi", type=str, default="none", choices=["none", "right", "auto"], help="ROI cropping strategy (default: none / full-frame)")
     parser.add_argument("--max-frames", type=int, default=1500)
     parser.add_argument("--show", action="store_true", help="Display visual playback window while testing")
     args = parser.parse_args()

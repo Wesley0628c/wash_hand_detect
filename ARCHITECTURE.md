@@ -20,33 +20,43 @@
 ```text
 wash_hand_detect/
 ├── README.md                      # 專案簡介與快速上手指南
-├── IMPLEMENTATION.md              # 系統技術設計規格書
 ├── ARCHITECTURE.md                # 專案架構與判斷模式說明（本文檔）
 ├── requirements.txt               # 專案相依 Python 套件清單
+├── pytest.ini                     # Pytest 配置檔案 (pythonpath = .)
 │
 ├── models/
-│   └── wash_hand_lstm.keras       # 已訓練之 LSTM 30 幀時序預測模型權重
+│   ├── wash_hand_xgb.joblib       # 960 維時序統計 XGBoost 分類器 (跨來源訓練)
+│   └── wash_hand_xgb_metadata.json # 模型完整 Provenance 中繼資料 (訓練時間/參數/指標)
 │
 ├── data/
-│   ├── raw/                       # 原始測試影片（如 WHO 示範、Facebook 實測影片等）
-│   ├── processed/                 # 受試者錄製之 30 幀特徵序列 (.npy)
-│   └── labels.csv                 # 錄製樣本清單與標籤索引
+│   ├── sample_v2/                 # 最新更新之獨立七步洗手動作影片 (.mov)
+│   ├── sample_v1/                 # 獨立基準七步洗手動作影片 (.mov)
+│   ├── clips/                     # YouTube 基準測試片段 (video1_yt, video2_yt2)
+│   └── annotated_eval_yt.mp4      # 完整標註基準測試影片
 │
 ├── src/
 │   ├── __init__.py
+│   ├── pipeline.py                # 統一洗手偵測推論管線 (WashHandPipeline)
 │   ├── camera.py                  # 影像來源封裝（支援 WebCam、影片檔案與合成測試畫面）
-│   ├── hand_detector.py           # MediaPipe 雙手 21 特徵點偵測、自適應 ROI 裁切與左右手校正
-│   ├── features.py                # 幾何、角度、法向量、指縫深度與單手重疊形態學特徵計算
-│   ├── rule_classifier.py         # 七步動作規則分類器與即時姿勢反饋生成
-│   ├── state_machine.py           # 洗手狀態轉移、持續秒數計時與教學/自由模式引擎
-│   ├── ui.py                      # 繁體中文 HUD 渲染器（半透明面板、進度條、七步清單）
-│   ├── realtime.py                # 即時辨識主程式 Pipeline
-│   ├── test_video.py              # 離線/批次影片評估與動作標註影片產出工具
-│   ├── collect_data.py            # 互動式資料收集錄製工具
-│   └── train.py                   # LSTM 時序模型訓練、Person-split 切分與 Confusion Matrix 評估
+│   ├── hand_detector.py           # MediaPipe 雙手偵測、等方 ROI 映射、無狀態救援實例與品質計分
+│   ├── features.py                # 160 維幾何拓撲、非對稱屈曲、指節距掌距離特徵計算
+│   ├── temporal_features.py       # 時序特徵滑動緩衝區 (160×6=960 維) 與骨架增強
+│   ├── rule_classifier.py         # 七步動作非對稱規則分類器與即時姿勢反饋
+│   ├── ml_classifier.py           # XGBoost 模型載入、機率預測與 Hybrid 混合架構
+│   ├── accumulator.py             # 帶遲滯 (Hysteresis) 邊界之時序機率積分器
+│   ├── state_machine.py           # 狀態機 (觀測秒數與顯示秒數分離、自由/順序模式)
+│   ├── ui.py                      # 繁體中文 HUD 渲染器 (即時狀態、信心度、反饋提示)
+│   ├── realtime.py                # WebCam 即時洗手辨識入口
+│   ├── test_video.py              # 批次影片評估與動作標註影片產出工具
+│   ├── evaluate_segments.py       # 基準影片區段辨識率與混淆矩陣報告工具
+│   └── train_ml.py                # 跨來源 GroupKFold / StratifiedKFold 訓練與中繼資料導出
+│
+├── docs/
+│   └── robustness_review.md       # 系統強健度、根因分析與消融實驗審查報告
 │
 └── tests/
-    └── test_pipeline.py           # 特徵計算、狀態機與分類器單元測試套件
+    ├── test_pipeline.py           # 基礎特徵、規則與狀態機單元測試
+    └── test_robustness.py         # 座標 Oracle、計時分離、模型 Fallback 等強健度回歸測試
 ```
 
 ---
@@ -55,27 +65,33 @@ wash_hand_detect/
 
 ```mermaid
 graph TD
-    A["影像來源 (Camera / 影片檔)"] --> B["HandDetector<br/>(自適應 ROI + MediaPipe 雙手偵測)"]
-    B --> C["Features Extractor<br/>(幾何角度 / 法向量 / 距離 / 形態學)"]
+    A["影像來源 (Camera / 影片檔)"] --> Pipe["WashHandPipeline<br/>(統一管線引擎)"]
     
-    C --> D1["Rule-based 分類器<br/>(雙層幾何形態規則推論)"]
-    C --> D2["LSTM 時序模型<br/>(30 幀滑動視窗預測)"]
+    subgraph Pipeline["WashHandPipeline 核心組件"]
+        B["HandDetector<br/>(主追蹤器 + 無狀態 CLAHE 救援 + 座標等方映射)"] --> C["Features Extractor<br/>(160 維幾何拓撲 + 非對稱屈曲 + 掌指錨點)"]
+        C --> Temp["TemporalFeatureBuffer<br/>(15 幀滑動統計量 960 維)"]
+        
+        Temp --> D1["Rule-based 分類器<br/>(非對稱指節屈曲推論)"]
+        Temp --> D2["XGBoost 分類器<br/>(960 維軟輸出模型預測)"]
+        
+        D1 & D2 --> Mix["Hybrid 機率融合加權<br/>(Rule Weight 0.25 + ML 0.75)"]
+        
+        Mix --> E["TemporalProbabilityAccumulator<br/>(遲滯 Margin + 幀數確認時序積分)"]
+        E --> F["WashHandStateMachine<br/>(分離 observed_times 與 step_times)"]
+    end
     
-    D1 -. 預設模式 .-> E["Temporal Smoothing<br/>(多數決滑動平滑濾波)"]
-    D2 -. 深度學習模式 .-> E
-    
-    E --> F["WashHandStateMachine<br/>(教學循序 / 自由模式狀態機)"]
-    F --> G["WashHandHUD<br/>(繁體中文 HUD 與進度渲染)"]
+    Pipe --> G["WashHandHUD<br/>(繁體中文 HUD 與雙手狀態渲染)"]
     G --> H["即時畫面顯示 / 標註影片輸出"]
 ```
 
 ### 資料處理階段說明：
-1. **輸入與自適應預處理**：支援鏡頭實時畫面與各種比例影片（如 16:9 橫向、9:16 直式短影音），若為直式/黑邊影片自動啟動自適應 ROI 聚焦，提升有效手部解析度。
-2. **骨架擷取**：擷取左右手各 21 個 3D 座標點（共 42 點），並消除 MediaPipe 左右手標籤重複覆蓋問題。
-3. **特徵工程**：計算 157 維特徵向量（手腕座標歸零、手掌尺度正規化、掌心法向量夾角、手指彎曲角、指尖對掌心距離、指縫交錯深度、運動速度等）。
-4. **動作推論**：支援即時雙模（Rule-based 幾何推論 與 LSTM 神經網路）。
-5. **時序平滑**：以長度為 10 幀的滑動視窗進行多數決濾波，消除動態模糊與短暫掉幀抖動。
-6. **狀態機推進**：依據設定模式（教學/自由）累計達標秒數，並提供即時中文指引反饋。
+1. **統一管線輸入 (WashHandPipeline)**：所有入口（WebCam 即時、批次測試、基準評估）均透過相同的管線實例處理，杜絕前處理歧異。
+2. **等方座標歸一化**：修正 ROI 雙重縮放問題，不論是全圖或局部裁切，皆以 $S = \max(W, H)$ 等方縮放映回原圖真實空間。
+3. **無狀態救援偵測**：當主追蹤器在厚泡沫下遺失手部時，調用獨立無狀態之 `Hands(static_image_mode=True)` CLAHE 實例嘗試救援，不污染主追蹤器的時序狀態。
+4. **特徵工程**：160 維基礎特徵向量，計算雙向非對稱屈曲、指節距掌心距離、指尖群集跨度與腕部包覆比。
+5. **時序統計增強**：滑動緩衝區提取近 15 幀的均值、標準差、最小值、最大值、起點與終點差（共 960 維）。
+6. **動態時序平滑**：以具遲滯門檻（Margin Threshold）與連續確認幀數的積分器平滑輸出，有效壓制幀間抖動。
+7. **觀測計時分離**：狀態機嚴格分離 `observed_times`（雙手皆可靠檢出之有效時間）與 `step_times`（UI 顯示累計時間），達標門檻嚴格以可靠觀測為準。
 
 ---
 

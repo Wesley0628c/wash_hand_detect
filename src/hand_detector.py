@@ -35,12 +35,21 @@ class HandDetector:
         self.mp_drawing_styles = mp.solutions.drawing_styles
         self.crop_split_screen = crop_split_screen
 
-        self.hands = self.mp_hands.Hands(
+        # Primary tracker for continuous stream
+        self.primary_hands = self.mp_hands.Hands(
             static_image_mode=static_image_mode,
             max_num_hands=max_num_hands,
             min_detection_confidence=min_detection_confidence,
             min_tracking_confidence=min_tracking_confidence,
         )
+        # Dedicated stateless detector for CLAHE/ROI rescue without polluting primary tracker
+        self.rescue_hands = self.mp_hands.Hands(
+            static_image_mode=True,
+            max_num_hands=max_num_hands,
+            min_detection_confidence=min_detection_confidence,
+            min_tracking_confidence=min_tracking_confidence,
+        )
+        self.hands = self.primary_hands  # Backward compatibility alias
 
         # Temporal tracking memory
         self.prev_left_hand: Optional[np.ndarray] = None
@@ -49,12 +58,32 @@ class HandDetector:
         self.right_lost_count: int = 0
         self.ghost_frames_threshold = ghost_frames_threshold
 
+        # Observation status metadata for latest frame
+        self.last_metadata: Dict[str, Any] = {
+            "left_status": "missing",
+            "right_status": "missing",
+            "is_observed": False,
+            "raw_num_hands": 0,
+            "quality_score": 0.0,
+        }
+
     def reset_tracking(self):
         """Reset temporal tracking history."""
         self.prev_left_hand = None
         self.prev_right_hand = None
         self.left_lost_count = 0
         self.right_lost_count = 0
+        self.last_metadata = {
+            "left_status": "missing",
+            "right_status": "missing",
+            "is_observed": False,
+            "raw_num_hands": 0,
+            "quality_score": 0.0,
+        }
+
+    def reset(self):
+        """Alias for reset_tracking."""
+        self.reset_tracking()
 
     def process(
         self, frame: np.ndarray, crop_split_screen: Optional[bool] = None
@@ -82,24 +111,24 @@ class HandDetector:
             roi_h = ymax - ymin
             roi = rgb_frame[ymin:ymax, xmin:xmax]
             roi_scaled = cv2.resize(roi, (roi_w * 2, roi_h * 2), interpolation=cv2.INTER_LINEAR)
-            results = self.hands.process(roi_scaled)
+            results = self.rescue_hands.process(roi_scaled)
             if results.multi_hand_landmarks and len(results.multi_hand_landmarks) > 0:
                 is_roi = True
             else:
                 roi_clahe = _enhance_contrast_clahe(roi_scaled)
-                results_clahe = self.hands.process(roi_clahe)
+                results_clahe = self.rescue_hands.process(roi_clahe)
                 if results_clahe.multi_hand_landmarks and len(results_clahe.multi_hand_landmarks) > 0:
                     results = results_clahe
                     is_roi = True
                 else:
-                    results = self.hands.process(rgb_frame)
+                    results = self.primary_hands.process(rgb_frame)
         else:
-            # Default: Full frame detection
-            results = self.hands.process(rgb_frame)
-            # If hands not found or only 1 hand found under foam, fallback to CLAHE contrast enhancement
+            # Default: Full frame detection with primary video tracker
+            results = self.primary_hands.process(rgb_frame)
+            # If hands not found or only 1 hand found under foam, fallback to CLAHE contrast enhancement via stateless rescue
             if not results.multi_hand_landmarks or len(results.multi_hand_landmarks) < 2:
                 enhanced = _enhance_contrast_clahe(rgb_frame)
-                results_clahe = self.hands.process(enhanced)
+                results_clahe = self.rescue_hands.process(enhanced)
                 if results_clahe.multi_hand_landmarks and len(results_clahe.multi_hand_landmarks) > (len(results.multi_hand_landmarks) if results.multi_hand_landmarks else 0):
                     results = results_clahe
 
@@ -115,14 +144,16 @@ class HandDetector:
                 results.multi_hand_landmarks, results.multi_handedness
             ):
                 label = handedness.classification[0].label  # "Left" or "Right"
-                coords = np.array(
-                    [[lm.x * (w / max_dim), lm.y * (h / max_dim), lm.z * (w / max_dim)] for lm in hand_landmarks.landmark],
-                    dtype=np.float32,
-                )
-                if is_roi:
-                    # Map coordinates from ROI back to full image normalized space
-                    coords[:, 0] = (coords[:, 0] * roi_w + xmin) / max_dim
-                    coords[:, 1] = (coords[:, 1] * roi_h + ymin) / max_dim
+                coords = np.zeros((21, 3), dtype=np.float32)
+                for idx, lm in enumerate(hand_landmarks.landmark):
+                    if is_roi:
+                        coords[idx, 0] = (xmin + lm.x * roi_w) / max_dim
+                        coords[idx, 1] = (ymin + lm.y * roi_h) / max_dim
+                        coords[idx, 2] = lm.z * (roi_w / max_dim)
+                    else:
+                        coords[idx, 0] = lm.x * (w / max_dim)
+                        coords[idx, 1] = lm.y * (h / max_dim)
+                        coords[idx, 2] = lm.z * (w / max_dim)
 
                 extracted_coords.append(coords)
                 extracted_labels.append(label)
@@ -181,29 +212,57 @@ class HandDetector:
                         curr_left_hand, curr_right_hand = h2, h1
 
         # 3. Temporal Dropout Smoothing / Ghosting for Foam & Occlusion
+        left_status = "missing"
         if curr_left_hand is not None:
             self.prev_left_hand = curr_left_hand.copy()
             self.left_lost_count = 0
             final_left = curr_left_hand
+            left_status = "observed"
         elif self.prev_left_hand is not None and self.left_lost_count < self.ghost_frames_threshold:
             self.left_lost_count += 1
             final_left = self.prev_left_hand
+            left_status = "held"
         else:
             final_left = None
             self.prev_left_hand = None
             self.left_lost_count = 0
 
+        right_status = "missing"
         if curr_right_hand is not None:
             self.prev_right_hand = curr_right_hand.copy()
             self.right_lost_count = 0
             final_right = curr_right_hand
+            right_status = "observed"
         elif self.prev_right_hand is not None and self.right_lost_count < self.ghost_frames_threshold:
             self.right_lost_count += 1
             final_right = self.prev_right_hand
+            right_status = "held"
         else:
             final_right = None
             self.prev_right_hand = None
             self.right_lost_count = 0
+
+        # Quality scoring: 1.0 (both observed), 0.7 (1 obs, 1 held), 0.4 (both held), 0.0 (missing)
+        if left_status == "observed" and right_status == "observed":
+            quality = 1.0
+        elif (left_status == "observed" and right_status == "held") or (right_status == "observed" and left_status == "held"):
+            quality = 0.7
+        elif left_status == "held" and right_status == "held":
+            quality = 0.4
+        elif left_status == "observed" or right_status == "observed":
+            quality = 0.5
+        elif left_status == "held" or right_status == "held":
+            quality = 0.3
+        else:
+            quality = 0.0
+
+        self.last_metadata = {
+            "left_status": left_status,
+            "right_status": right_status,
+            "is_observed": (left_status == "observed" and right_status == "observed"),
+            "raw_num_hands": len(extracted_coords) if (results.multi_hand_landmarks and results.multi_handedness) else 0,
+            "quality_score": quality,
+        }
 
         return final_left, final_right, results
 
@@ -240,5 +299,8 @@ class HandDetector:
         return canvas
 
     def close(self):
-        if self.hands:
-            self.hands.close()
+        if hasattr(self, "primary_hands") and self.primary_hands:
+            self.primary_hands.close()
+        if hasattr(self, "rescue_hands") and self.rescue_hands:
+            self.rescue_hands.close()
+

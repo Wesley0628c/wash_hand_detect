@@ -242,6 +242,16 @@ def extract_hand_features(
         ])) / avg_scale
         min_fingertip_spread = min(left_spread, right_spread)
 
+        min_tips_to_wrist = min(
+            euclidean_distance(left_tip_center, right_hand[WRIST]),
+            euclidean_distance(right_tip_center, left_hand[WRIST]),
+        ) / avg_scale
+        min_web_to_thumb = min(
+            euclidean_distance(left_hand[THUMB_CMC], right_hand[THUMB_TIP]),
+            euclidean_distance(right_hand[THUMB_CMC], left_hand[THUMB_TIP]),
+        ) / avg_scale
+        thumb_to_thumb_dist = euclidean_distance(left_hand[THUMB_TIP], right_hand[THUMB_TIP]) / avg_scale
+
         inter_hand_features = {
             "wrist_dist": wrist_dist,
             "palm_center_dist": palm_center_dist,
@@ -251,6 +261,7 @@ def extract_hand_features(
             "left_palm_to_right_wrist": left_palm_to_right_wrist,
             "right_palm_to_left_wrist": right_palm_to_left_wrist,
             "min_palm_to_wrist": min_p_to_w,
+            "min_tips_to_wrist": min_tips_to_wrist,
             "wrist_ratio": wrist_ratio,
             "left_knuckles_to_right_palm": left_knuckles_to_right_palm,
             "right_knuckles_to_left_palm": right_knuckles_to_left_palm,
@@ -258,6 +269,8 @@ def extract_hand_features(
             "left_palm_to_right_thumb": left_palm_to_right_thumb,
             "right_palm_to_left_thumb": right_palm_to_left_thumb,
             "min_palm_to_thumb": min(left_palm_to_right_thumb, right_palm_to_left_thumb),
+            "min_web_to_thumb": min_web_to_thumb,
+            "thumb_to_thumb_dist": thumb_to_thumb_dist,
             "mean_tip_dist": float(np.mean(tip_distances)),
             "interlace_depth": float(interlace_depth),
             "min_fingertip_spread": min_fingertip_spread,

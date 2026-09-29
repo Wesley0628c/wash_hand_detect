@@ -31,12 +31,40 @@
   移除 WebCam 誤裁切 (完整捕捉雙手) + 移除複雜側邊進度條 (極速即時動作辨識) + 頂部 7 步即時徽章與雙手狀態指示
       │
       ▼
-[V3.4.0 等方性長寬比校正 & 高容錯幾何拓撲判定 & 監督式 XGBoost 升級] (現行最新版本)
-  等方性 3D 骨架長寬比校正 (解決 iPhone 9:16 直向拍攝視角壓縮 31° 畸變) + 7 步洗手高容錯空間拓撲放寬 + 重新訓練 18,860 樣本 960 維監督式 XGBoost 模型 (Accuracy 99%)
+[V3.4.0 等方性長寬比校正 & 高容錯幾何拓撲判定 & 監督式 XGBoost 升級]
+  等方性 3D 骨架長寬比校正 (解決 iPhone 9:16 直向拍攝視角壓縮 31° 畸變) + 7 步洗手高容錯空間拓撲放寬 + 重新訓練 18,860 樣本 960 維監督式 XGBoost 模型
+      │
+      ▼
+[V3.5.0 sample_v2 動作校正、ROI 座標修復、無狀態救援與觀測計時分離] (現行最新版本)
+  修正 ROI 座標雙重縮放 (解除 141px 偏移) + 隔離 CLAHE 無狀態救援實例 + 分離真實觀測時間與 UI 累計時間 + 非對稱指節屈曲 (徹底消弭弓/夾混淆) + 統一 WashHandPipeline + 整合 sample_v2 / sample_v1 跨來源 GroupKFold 驗證與完整 Provenance 導出
+```
 
 ---
 
-## 🚀 [V3.4.0] - 2026-09-23 (現行最新版)
+## 🚀 [V3.5.0] - 2026-09-28 (現行最新版)
+
+### 🌟 新增功能與重大修正 (Features & Bug Fixes)
+1. **修正 HandDetector 內建 ROI 等方座標雙重縮放缺陷 (`src/hand_detector.py`)**：
+   - 解決分割畫面 ROI 座標映回全圖時 y 軸重複乘除寬高比之錯誤（在 1280×720 下偏差高達 141 像素）。
+   - 建立全圖與 ROI 統一定義之等方轉換公式，附帶幾何 Oracle 回歸單元測試。
+2. **隔離救援偵測器狀態（Stateless Rescue Detector, `src/hand_detector.py`)**：
+   - 使用獨立無時序狀態之 `Hands(static_image_mode=True)` 處理 CLAHE 及 ROI 候選幀，避免內部卡爾曼濾波與時序追蹤遭跨座標域污染。
+3. **分離真實觀測時間與 UI 顯示時間 (`src/state_machine.py`)**：
+   - 明確標記 `observed`、`held` (幽靈幀) 與 `missing`。
+   - 狀態機獨立維護 `observed_times`，步驟達標嚴格以可驗證的當前有效觀測時間為準，杜絕靠保留畫面幽靈幀濫充達標。
+4. **非對稱幾何特徵重構，消弭「弓（knuckles）」與「夾（interlace）」混淆 (`src/rule_classifier.py`, `src/features.py`)**：
+   - 廢除單純平均彎曲（mean curl），改採非對稱屈曲差值（`curl_diff`、`min_curl`、`max_curl`）與指節對掌心距離錨點。
+   - 在全新 `data/sample_v2` 上「夾」與「弓」達成 **100% 零混淆辨識**！
+5. **建立統一推論管線 (`src/pipeline.py`)**：
+   - 新增 `WashHandPipeline`、`PipelineConfig` 與 `FrameResult`，統一即時鏡頭、離線評估、測試工具之特徵抽取、平滑與計時契約。
+6. **整合 `sample_v2` / `sample_v1` 與無洩漏跨來源驗證 (`src/train_ml.py`)**：
+   - 整合多組使用者錄製與公開基準影片，支援 `GroupKFold` 跨獨立影片群組交叉驗證，並導出 `models/wash_hand_xgb_metadata.json` 完整中繼資料記錄 Provenance。
+7. **回歸測試套件建立 (`tests/test_robustness.py`, `pytest.ini`)**：
+   - 新增 19 項自動化測試，全面涵蓋座標 Oracle、計時分離、模型 Fallback 等關鍵風險。
+
+---
+
+## 🚀 [V3.4.0] - 2026-09-23
 
 ### 🌟 新增功能與重大修正 (Features & Bug Fixes)
 1. **等方性長寬比校正 (Isotropic Landmark Normalization, `src/hand_detector.py`)**：

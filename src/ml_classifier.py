@@ -66,11 +66,25 @@ class WashHandMLClassifier:
             try:
                 # Shape: (1, 960)
                 ml_probs_arr = self.model.predict_proba(temp_960.reshape(1, -1))[0]
-                ml_probs = {LABELS[i]: float(ml_probs_arr[i]) for i in range(len(ml_probs_arr))}
+                if hasattr(self.model, "classes_"):
+                    ml_probs = {k: 0.001 for k in LABELS.values()}
+                    for cls_idx, prob in zip(self.model.classes_, ml_probs_arr):
+                        if cls_idx in LABELS:
+                            ml_probs[LABELS[cls_idx]] = float(prob)
+                else:
+                    ml_probs = {LABELS[i]: float(ml_probs_arr[i]) for i in range(len(ml_probs_arr))}
             except Exception as e:
-                ml_probs = self.rule_classifier.predict_probabilities(features)
+                if self.rule_classifier is not None:
+                    ml_probs = self.rule_classifier.predict_probabilities(features)
+                else:
+                    ml_probs = {k: 0.01 for k in LABELS.values()}
+                    ml_probs["other"] = 0.93
         else:
-            ml_probs = self.rule_classifier.predict_probabilities(features)
+            if self.rule_classifier is not None:
+                ml_probs = self.rule_classifier.predict_probabilities(features)
+            else:
+                ml_probs = {k: 0.01 for k in LABELS.values()}
+                ml_probs["other"] = 0.93
 
         # 3. Hybrid Blending with Geometric Rules (if enabled)
         if self.hybrid_with_rules and self.rule_classifier is not None and self.model is not None:

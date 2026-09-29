@@ -5,6 +5,11 @@ computing Frame Accuracy, Segment Precision, Recall, F1-score, and Confusion Mat
 """
 
 import os
+import sys
+
+# Ensure project root is in sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 from typing import Dict, List, Tuple, Any, Optional
 import cv2
@@ -32,6 +37,17 @@ BENCHMARK_GROUND_TRUTH = {
         (34.4, 39.2, "wrist"),
         (39.2, 50.8, "other"),
     ],
+    "wash_7steps_yt.mov": [
+        (0.0, 4.3, "other"),
+        (4.3, 8.3, "inside"),
+        (8.3, 13.5, "outside"),
+        (13.5, 19.0, "interlace"),
+        (19.0, 24.4, "knuckles"),
+        (24.4, 30.7, "thumb"),
+        (30.7, 34.4, "fingertips"),
+        (34.4, 39.2, "wrist"),
+        (39.2, 50.8, "other"),
+    ],
     "wash_7steps_yt2.mp4": [
         (0.0, 19.0, "other"),
         (19.0, 23.0, "inside"),
@@ -43,6 +59,24 @@ BENCHMARK_GROUND_TRUTH = {
         (47.0, 51.0, "wrist"),
         (52.0, 93.0, "other"),
     ],
+    "wash_7steps_yt2.mov": [
+        (0.0, 19.0, "other"),
+        (19.0, 23.0, "inside"),
+        (24.0, 27.0, "outside"),
+        (28.0, 31.0, "interlace"),
+        (32.0, 36.0, "knuckles"),
+        (37.0, 41.0, "thumb"),
+        (42.0, 46.0, "fingertips"),
+        (47.0, 51.0, "wrist"),
+        (52.0, 93.0, "other"),
+    ],
+    "內.mov": [(0.0, 999.0, "inside")],
+    "外.mov": [(0.0, 999.0, "outside")],
+    "夾.mov": [(0.0, 999.0, "interlace")],
+    "弓.mov": [(0.0, 999.0, "knuckles")],
+    "大.mov": [(0.0, 999.0, "thumb")],
+    "立.mov": [(0.0, 999.0, "fingertips")],
+    "腕.mov": [(0.0, 999.0, "wrist")],
 }
 
 
@@ -63,8 +97,8 @@ def evaluate_video(
 ) -> Dict[str, Any]:
     video_name = os.path.basename(video_path)
     if video_name not in BENCHMARK_GROUND_TRUTH:
-        print(f"[!] Warning: No ground truth registered for {video_name}, fallback to generic.")
-        segments = [(0.0, 999.0, "other")]
+        print(f"[!] 警告: 未知影片名稱 '{video_name}'，無預設 Ground Truth 標註。不計算監督式指標 (未標註影片不假定為全 other)。")
+        segments = None
     else:
         segments = BENCHMARK_GROUND_TRUTH[video_name]
 
@@ -118,16 +152,20 @@ def evaluate_video(
 
         timestamp = frame_idx / fps
         dt = 1.0 / fps
-        gt_label = get_ground_truth_label(timestamp, segments)
+        gt_label = get_ground_truth_label(timestamp, segments) if segments is not None else "unlabeled"
 
         left_hand, right_hand, results = detector.process(frame)
         features = extract_hand_features(
             left_hand, right_hand, prev_left_hand=prev_left, prev_right_hand=prev_right
         )
-        probs = classifier.predict_probabilities(features)
+        if isinstance(classifier, WashHandRuleClassifier):
+            probs = classifier.predict_probabilities(features, timestamp=timestamp)
+        else:
+            probs = classifier.predict_probabilities(features)
         pred_label, pred_conf, _ = accumulator.update(probs, timestamp=timestamp)
 
-        state_machine.update(pred_label, dt=dt)
+        is_obs = detector.last_metadata.get("is_observed", False)
+        state_machine.update(pred_label, dt=dt, is_observed=is_obs)
         summary = state_machine.get_progress_summary()
         feedback_msg = FEEDBACK_ZH.get(pred_label, "請依七步口訣持續搓洗")
 
@@ -165,7 +203,17 @@ def evaluate_video(
         cv2.destroyAllWindows()
     detector.close()
 
-    # Calculate metrics
+    # Calculate metrics if ground truth is available
+    if segments is None:
+        print("\n[!] 該影片未登記 Ground Truth 標註，不計算監督式指標 (Precision / Recall / Confusion Matrix)。")
+        from collections import Counter
+        pred_counts = Counter(y_pred)
+        print("📊 【預測動作分佈】")
+        for p_label, cnt in pred_counts.most_common():
+            zh_name = LABEL_SHORT_ZH.get(p_label, p_label)
+            print(f"   - {zh_name:2s} ({p_label:10s}): {cnt:5d} 幀 ({(cnt/len(y_pred))*100:5.1f}%)")
+        return {"report": None, "segment_accuracies": {}, "confusion_matrix": None}
+
     target_names = [LABELS[i] for i in range(8)]
     report = classification_report(y_true, y_pred, labels=target_names, zero_division=0, output_dict=True)
     report_text = classification_report(y_true, y_pred, labels=target_names, zero_division=0)

@@ -44,6 +44,7 @@ class WashHandStateMachine:
         self.current_step_idx = 0
         self.completed_steps: Set[str] = set()
         self.step_times: Dict[str, float] = {step: 0.0 for step in STEPS_ORDER}
+        self.observed_times: Dict[str, float] = {step: 0.0 for step in STEPS_ORDER}
 
         self.active_step: Optional[str] = None
         self.step_timer = 0.0
@@ -61,6 +62,7 @@ class WashHandStateMachine:
         self.current_step_idx = 0
         self.completed_steps.clear()
         self.step_times = {step: 0.0 for step in STEPS_ORDER}
+        self.observed_times = {step: 0.0 for step in STEPS_ORDER}
         self.active_step = None
         self.step_timer = 0.0
         self.grace_timer = 0.0
@@ -68,21 +70,28 @@ class WashHandStateMachine:
         self.end_time = None
         self.is_completed = False
 
-    def update(self, detected_label: str, dt: float) -> Tuple[bool, Optional[str]]:
+    def update(
+        self, detected_label: str, dt: float, is_observed: bool = True
+    ) -> Tuple[bool, Optional[str]]:
         """
         Update state machine with the latest detected action label and delta time.
         Returns (is_step_just_completed, completed_step_name).
         """
-        if self.is_completed:
-            return False, None
-
         if self.start_time is None and detected_label in STEPS_ORDER:
             self.start_time = time.time()
+
+        if is_observed and detected_label in STEPS_ORDER:
+            self.observed_times[detected_label] += dt
 
         just_completed = False
         completed_step_name = None
 
         if self.mode == "sequence":
+            if self.is_completed:
+                if detected_label in STEPS_ORDER:
+                    self.step_times[detected_label] += dt
+                return False, None
+
             target_step = self._get_target_step()
             is_valid_action = (detected_label == target_step)
 
@@ -113,21 +122,21 @@ class WashHandStateMachine:
                         if self.step_timer == 0.0:
                             self.active_step = None
         else:  # "free" mode: user can perform any of the 7 steps in random/arbitrary order
-            if detected_label in STEPS_ORDER and detected_label not in self.completed_steps:
+            if detected_label in STEPS_ORDER:
                 self.active_step = detected_label
                 self.step_times[detected_label] += dt
-                self.step_timer = self.step_times[detected_label]
                 self.grace_timer = 0.0
 
-                if self.step_times[detected_label] >= self.step_duration:
-                    self.completed_steps.add(detected_label)
-                    just_completed = True
-                    completed_step_name = detected_label
-                    self.step_timer = 0.0
-                    self.active_step = None
+                if detected_label not in self.completed_steps:
+                    self.step_timer = self.observed_times[detected_label]
+                    if self.observed_times[detected_label] >= self.step_duration - 1e-5:
+                        self.completed_steps.add(detected_label)
+                        just_completed = True
+                        completed_step_name = detected_label
+                        self.step_timer = 0.0
 
-                    if len(self.completed_steps) >= len(STEPS_ORDER):
-                        self._finish_session()
+                        if len(self.completed_steps) >= len(STEPS_ORDER) and not self.is_completed:
+                            self._finish_session()
             else:
                 if self.active_step is not None:
                     self.grace_timer += dt
@@ -174,4 +183,5 @@ class WashHandStateMachine:
             "is_completed": self.is_completed,
             "total_time": total_time,
             "step_times": self.step_times,
+            "observed_times": self.observed_times,
         }

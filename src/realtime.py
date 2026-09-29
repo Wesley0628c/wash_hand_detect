@@ -5,6 +5,11 @@ Classifiers (Rule-based & LSTM), 1.0s Temporal Probability Accumulator, State Ma
 """
 
 import os
+import sys
+
+# Ensure project root is in sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import time
 import argparse
 from collections import deque
@@ -112,15 +117,19 @@ class RealtimeWashHandDetector:
             decided_label, decided_conf, _ = self.accumulator.update(frame_probs, timestamp=now)
             feedback_msg = FEEDBACK_ZH.get(decided_label, "請依七步口訣持續搓洗")
 
-            # 5. State Machine Update
-            just_completed, completed_step = self.state_machine.update(decided_label, dt)
+            # 5. State Machine Update (separate fresh observation from held ghost frames)
+            meta = self.detector.last_metadata
+            is_fresh_observation = meta.get("is_observed", False)
+            just_completed, completed_step = self.state_machine.update(
+                decided_label, dt=dt, is_observed=is_fresh_observation
+            )
             if just_completed and completed_step:
                 print(f"[🎉] 恭喜！已完成步驟: {completed_step}")
 
             # 6. UI HUD Rendering
             hands_status = {
-                "left": left_hand is not None,
-                "right": right_hand is not None,
+                "left": meta.get("left_status") == "observed",
+                "right": meta.get("right_status") == "observed",
             }
             progress = self.state_machine.get_progress_summary()
             final_frame = self.hud.draw_hud(
