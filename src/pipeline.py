@@ -22,7 +22,7 @@ from src.state_machine import WashHandStateMachine
 @dataclass
 class PipelineConfig:
     """Centralized configuration for wash hand detection pipeline."""
-    model_type: str = "hybrid"  # "hybrid", "rule", "ml"
+    model_type: str = "rule"  # "hybrid", "rule", "ml" — default is pure rule-based
     model_path: str = "models/wash_hand_xgb.joblib"
     min_detection_confidence: float = 0.50
     min_tracking_confidence: float = 0.50
@@ -34,6 +34,7 @@ class PipelineConfig:
     rule_weight: float = 0.25
     step_duration: float = 1.0
     guide_mode: str = "free"  # "free" or "sequence"
+
 
 
 @dataclass
@@ -103,6 +104,7 @@ class WashHandPipeline:
         self.prev_left: Optional[np.ndarray] = None
         self.prev_right: Optional[np.ndarray] = None
         self.frame_idx: int = 0
+        self._prev_timestamp: Optional[float] = None
 
     def reset(self):
         """Reset internal pipeline history."""
@@ -114,6 +116,7 @@ class WashHandPipeline:
         self.prev_left = None
         self.prev_right = None
         self.frame_idx = 0
+        self._prev_timestamp = None
 
     def process_frame(
         self,
@@ -129,6 +132,13 @@ class WashHandPipeline:
         self.frame_idx += 1
         ts = timestamp_sec if timestamp_sec is not None else float(self.frame_idx / 30.0)
 
+        # Compute real dt from consecutive timestamps (avoids hardcoded 1/30)
+        if self._prev_timestamp is not None:
+            dt = max(1e-4, ts - self._prev_timestamp)
+        else:
+            dt = 1.0 / 30.0
+        self._prev_timestamp = ts
+
         # 1. Detection
         left_hand, right_hand, results = self.detector.process(
             frame, crop_split_screen=crop_split_screen
@@ -142,12 +152,18 @@ class WashHandPipeline:
         vec_160 = feature_dict_to_vector(features)
 
         # 3. Model Classification
+        # FIX: rule_classifier.predict_probabilities() does not accept timestamp;
+        # ml_classifier handles its own buffer reset when no hands.
         if left_hand is not None or right_hand is not None:
             if self.config.model_type in ("hybrid", "ml") and self.ml_classifier is not None:
                 frame_probs = self.ml_classifier.predict_probabilities(features)
             else:
-                frame_probs = self.rule_classifier.predict_probabilities(features, timestamp=ts)
+                # rule-only: correct API call (no timestamp param)
+                frame_probs = self.rule_classifier.predict_probabilities(features)
         else:
+            # No hands: reset ML temporal buffer to prevent stale feature carry-over
+            if self.ml_classifier is not None:
+                self.ml_classifier.reset()
             frame_probs = {k: 0.01 for k in LABELS.values()}
             frame_probs["other"] = 0.93
 
@@ -157,7 +173,6 @@ class WashHandPipeline:
         label, conf, integrated = self.accumulator.update(frame_probs, timestamp=ts)
 
         # 5. State Machine Tracking (separate observed evidence from unobserved)
-        dt = 1.0 / 30.0
         is_fresh_observation = meta.get("is_observed", False)
         just_completed, completed_name = self.state_machine.update(
             label, dt=dt, is_observed=is_fresh_observation

@@ -43,13 +43,16 @@ SAMPLE_V2_MAP = {
 def extract_dataset(
     sample_v2_dir: str = "data/sample_v2",
     sample_v1_dir: str = "data/sample_v1",
-    clips_dir: str = "data/clips",
-    annotated_eval_path: str = "data/annotated_eval_yt.mp4",
     augmentations_per_frame: int = 1,
     buffer_size: int = 15,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """
-    Extract temporal statistical feature vectors from sample_v2, sample_v1, clips, and other negative samples.
+    Extract temporal statistical feature vectors from sample_v1 and sample_v2 .mov files.
+
+    Group isolation: each .mov file = 1 group (14 groups total: v1 x 7 + v2 x 7).
+    GroupKFold validation trains on one source's .mov files and tests on another,
+    giving a realistic cross-person/session generalization estimate.
+
     Returns:
         (X, y, groups, source_names)
     """
@@ -126,105 +129,21 @@ def extract_dataset(
             cap.release()
             print(f"   - {mov_name} ({label_name:10s}): 擷取 {f_count} 幀有效樣本")
 
-    # 1. Extract from sample_v2 clips (High quality updated isolated user step clips)
+    # 1. Extract from sample_v2 (high quality isolated step recordings)
     _extract_from_sample_dir(sample_v2_dir, "sample_v2")
 
-    # 2. Extract from sample_v1 clips (Additional isolated user step clips)
+    # 2. Extract from sample_v1 (additional isolated step recordings from different session)
     _extract_from_sample_dir(sample_v1_dir, "sample_v1")
 
-    # 3. Extract from data/clips subfolders (video1_yt and video2_yt2)
-    clip_step_map = {
-        "01_inside.mp4": "inside",
-        "02_outside.mp4": "outside",
-        "03_interlace.mp4": "interlace",
-        "04_knuckles.mp4": "knuckles",
-        "05_thumb.mp4": "thumb",
-        "06_fingertips.mp4": "fingertips",
-        "07_wrist.mp4": "wrist",
-    }
+    # NOTE: data/clips is NOT used for training — raw .mov files are the canonical source.
+    # Adding clips would create overlapping groups with the YouTube raw videos.
 
-    if os.path.exists(clips_dir):
-        for sub in sorted(os.listdir(clips_dir)):
-            sub_dir = os.path.join(clips_dir, sub)
-            if not os.path.isdir(sub_dir):
-                continue
-            print(f"[*] 正在從片段資料夾抽取特徵: {sub}...")
-            curr_group = group_idx
-            group_idx += 1
-
-            for clip_file, label_name in sorted(clip_step_map.items()):
-                clip_path = os.path.join(sub_dir, clip_file)
-                if not os.path.exists(clip_path):
-                    continue
-
-                cap = cv2.VideoCapture(clip_path)
-                if not cap.isOpened():
-                    continue
-
-                lbl_idx = NAME_TO_LABEL[label_name]
-                buf_clip = TemporalFeatureBuffer(buffer_size=buffer_size)
-                detector.reset_tracking()
-                prev_l, prev_r = None, None
-                f_count = 0
-
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-
-                    # Check width for auto ROI
-                    h, w = frame.shape[:2]
-                    left, right, _ = detector.process(frame, crop_split_screen=(w > h * 1.3))
-                    if left is not None or right is not None:
-                        feats = extract_hand_features(left, right, prev_l, prev_r)
-                        vec = feature_dict_to_vector(feats)
-                        temp_vec = buf_clip.update(vec)
-                        X_list.append(temp_vec)
-                        y_list.append(lbl_idx)
-                        group_list.append(curr_group)
-                        f_count += 1
-                    prev_l, prev_r = left, right
-
-                cap.release()
-                print(f"   - {sub}/{clip_file} ({label_name}): 擷取 {f_count} 幀樣本")
-
-    # 3. Extract 'other' (class 0) negative samples from non-wash sections
-    if os.path.exists(annotated_eval_path):
-        print(f"[*] 正在從 {annotated_eval_path} 抽取非洗手 (other) 負樣本...")
-        cap = cv2.VideoCapture(annotated_eval_path)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        buf_other = TemporalFeatureBuffer(buffer_size=buffer_size)
-        detector.reset_tracking()
-        prev_l, prev_r = None, None
-        curr_group = group_idx
-        group_idx += 1
-        other_count = 0
-        f_idx = 0
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            t_sec = f_idx / fps
-            # Sections known to be 'other' (0.0 to 4.0s, and after 40.0s)
-            if (t_sec < 4.0 or t_sec > 40.0) and f_idx % 2 == 0:
-                h, w = frame.shape[:2]
-                left, right, _ = detector.process(frame, crop_split_screen=(w > h * 1.3))
-                feats = extract_hand_features(left, right, prev_l, prev_r)
-                vec = feature_dict_to_vector(feats)
-                temp_vec = buf_other.update(vec)
-                X_list.append(temp_vec)
-                y_list.append(0)  # other
-                group_list.append(curr_group)
-                other_count += 1
-                prev_l, prev_r = left, right
-            f_idx += 1
-        cap.release()
-        print(f"   - 成功抽取 {other_count} 幀 other 負樣本")
-
-    # Synthetic negative other samples (hands separated / idle)
-    for _ in range(120):
-        # Create hands far apart
+    # Synthetic 'other' (class 0) negative samples: hands far apart or idle.
+    # These are needed because sample_v1/v2 only contain wash gestures (classes 1-7).
+    print("[*] 生成合成 other (class 0) 負樣本...")
+    other_group = group_idx
+    group_idx += 1
+    for _ in range(150):
         dummy_feats = {
             "has_left": True,
             "has_right": True,
@@ -237,6 +156,8 @@ def extract_dataset(
             "left_angles": [180.0] * 5,
             "right_angles": [180.0] * 5,
             "velocity": 0.0,
+            "active_angles": [180.0] * 5,
+            "active_spread": 0.0,
             "inter_hand": {
                 "wrist_dist": 99.0,
                 "palm_center_dist": 99.0,
@@ -257,12 +178,14 @@ def extract_dataset(
             },
         }
         vec = feature_dict_to_vector(dummy_feats)
-        temp_vec = np.tile(vec, 6)
+        temp_vec = np.tile(vec, 6)  # replicate across 6 temporal stats → 960 dim
         X_list.append(temp_vec)
         y_list.append(0)
-        group_list.append(group_idx)
+        group_list.append(other_group)
+    print(f"   - 生成 150 幀合成 other 負樣本 (group={other_group})")
 
     detector.close()
+
 
     X = np.array(X_list, dtype=np.float32)
     y = np.array(y_list, dtype=np.int32)
@@ -413,11 +336,10 @@ def train_xgboost_classifier(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train XGBoost wash hand classifier with sample_v2 & benchmark videos.")
+    parser = argparse.ArgumentParser(description="Train XGBoost wash hand classifier using sample_v1 & sample_v2 .mov files.")
     parser.add_argument("--output", type=str, default="models/wash_hand_xgb.joblib", help="Output model path")
     parser.add_argument("--sample-v2", type=str, default="data/sample_v2", help="Path to sample_v2 directory")
     parser.add_argument("--sample-v1", type=str, default="data/sample_v1", help="Path to sample_v1 directory")
-    parser.add_argument("--raw", type=str, default="data/raw", help="Path to raw videos directory")
     parser.add_argument("--aug", type=int, default=2, help="Augmentations per frame")
     parser.add_argument("--estimators", type=int, default=150, help="Number of XGBoost trees")
     parser.add_argument("--depth", type=int, default=6, help="Max tree depth")
@@ -427,8 +349,6 @@ if __name__ == "__main__":
     X, y, groups, sources = extract_dataset(
         sample_v2_dir=args.sample_v2,
         sample_v1_dir=args.sample_v1,
-        clips_dir="data/clips",
-        annotated_eval_path="data/annotated_eval_yt.mp4",
         augmentations_per_frame=args.aug,
     )
 
@@ -442,3 +362,4 @@ if __name__ == "__main__":
         )
     else:
         print("[!] No training samples could be extracted.")
+

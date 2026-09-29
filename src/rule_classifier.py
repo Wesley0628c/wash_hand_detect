@@ -76,6 +76,8 @@ class WashHandRuleClassifier:
             return probs
 
         # Logit evidence scores
+        # FIX: use calibrated logit range (2.0–3.5) instead of hard 10 vs 0.
+        # softmax(3.5 vs 0s) ≈ 97%, softmax(2.0 vs 0s) ≈ 88%, allowing ML to compete.
         scores = {k: 0.0 for k in LABELS.values()}
 
         # 1. Dual-Hand Geometric Evidence
@@ -101,57 +103,67 @@ class WashHandRuleClassifier:
             max_curl = max(left_curl, right_curl)
             curl_diff = abs(left_curl - right_curl)
 
-            # [Level 1] 腕 (Wrist): Grasping opposite wrist
+            # [Level 1] 腕 (Wrist): Grasping opposite wrist — strong geometric signal
             if wrist_ratio < 0.65 and (min_p_to_w < 1.0 or palm_dist > 0.85):
-                scores["wrist"] = 10.0
+                scores["wrist"] = 3.5
 
             # [Level 2] 立 (Fingertips): Bundled fingertips upright into opposite palm
-            elif palm_dist > 1.05 and min_t_to_p < 1.15 and min_curl > 115.0 and (palm_dist > min_t_to_p + 0.15 or tip_dist > 1.10):
-                scores["fingertips"] = 10.0
+            # NOTE: thumb and fingertips compete; use stricter finger-spread condition
+            elif (palm_dist > 1.05 and min_t_to_p < 1.15 and min_curl > 115.0
+                  and (palm_dist > min_t_to_p + 0.15 or tip_dist > 1.10)
+                  and fingertip_spread < 0.30):  # tighter spread = true fingertip bundle
+                scores["fingertips"] = 3.0
 
             # [Level 3] 大 (Thumb): One hand curled around opposite thumb
-            elif (min_curl < 115.0 or curl_diff > 25.0) and (min_p_to_th < 1.05 or min_web_to_th < 1.10) and min(min_p_to_th, min_web_to_th) <= min_knuckles_to_p + 0.15:
-                scores["thumb"] = 10.0
+            elif ((min_curl < 115.0 or curl_diff > 25.0)
+                  and (min_p_to_th < 1.05 or min_web_to_th < 1.10)
+                  and min(min_p_to_th, min_web_to_th) <= min_knuckles_to_p + 0.15):
+                scores["thumb"] = 3.0
 
             # [Level 4] 弓 (Knuckles): Curled fist PIP knuckles rubbing palm
-            elif (min_curl < 135.0 or curl_diff > 20.0) and min_knuckles_to_p < 0.95 and palm_dist < 1.50:
-                scores["knuckles"] = 10.0
+            elif ((min_curl < 135.0 or curl_diff > 20.0)
+                  and min_knuckles_to_p < 0.95 and palm_dist < 1.50):
+                scores["knuckles"] = 2.5
 
             # [Level 5] 外 (Outside): Palm on back of opposite hand (dorsum)
-            elif (palm_dot > -0.25 or (interlace_depth > 0.88 and fingertip_spread < 0.25)) and max_curl > 125.0 and palm_dist < 1.60 and interlace_depth >= 0.80:
-                scores["outside"] = 10.0
+            elif ((palm_dot > -0.25 or (interlace_depth > 0.88 and fingertip_spread < 0.25))
+                  and max_curl > 125.0 and palm_dist < 1.60 and interlace_depth >= 0.80):
+                scores["outside"] = 2.5
 
             # [Level 6] 夾 (Interlace): Bilateral finger interleaving
-            elif palm_dist < 1.50 and min_curl > 120.0 and ((interlace_depth < 1.25 and (tip_dist > 0.35 or interlace_depth < 1.08)) or (tip_dist > 0.50 and interlace_depth < 1.30)):
-                scores["interlace"] = 10.0
+            elif (palm_dist < 1.50 and min_curl > 120.0
+                  and ((interlace_depth < 1.25 and (tip_dist > 0.35 or interlace_depth < 1.08))
+                       or (tip_dist > 0.50 and interlace_depth < 1.30))):
+                scores["interlace"] = 2.5
 
-            # [Level 7] 內 (Inside): Palm-to-palm flat rubbing
+            # [Level 7] 內 (Inside): Palm-to-palm flat rubbing — least specific, lowest logit
             elif palm_dist < 1.50:
-                scores["inside"] = 10.0
+                scores["inside"] = 2.0
             else:
-                scores["other"] = 10.0
+                scores["other"] = 2.0
 
-        # 2. Single-Hand / Merged Cluster Morphology Evidence (for foam/occlusion fallback)
+        # 2. Single-Hand / Merged Cluster Fallback — lower confidence (single-hand less reliable)
         else:
             active_angles = features.get("active_angles", [0.0]*5)
             active_spread = float(features.get("active_spread", 0.0))
             mean_4_angle = float(np.mean(active_angles[1:])) if len(active_angles) >= 5 else 180.0
             thumb_angle = float(active_angles[0]) if len(active_angles) >= 1 else 180.0
 
+            # Lower logit scores for single-hand: max ~2.0 → softmax ~88%
             if mean_4_angle < 135.0 and thumb_angle > 135.0:
-                scores["thumb"] = 10.0
+                scores["thumb"] = 2.0
             elif active_spread < 0.30 or (mean_4_angle < 125.0 and active_spread < 0.35):
-                scores["fingertips"] = 10.0
+                scores["fingertips"] = 1.8
             elif mean_4_angle < 152.0:
-                scores["knuckles"] = 10.0
+                scores["knuckles"] = 1.8
             elif active_spread > 0.38 and mean_4_angle < 170.0:
-                scores["interlace"] = 10.0
+                scores["interlace"] = 1.8
             elif thumb_angle < 140.0 and mean_4_angle > 145.0:
-                scores["outside"] = 10.0
+                scores["outside"] = 1.8
             elif mean_4_angle > 162.0:
-                scores["inside"] = 10.0
+                scores["inside"] = 1.8
             else:
-                scores["other"] = 10.0
+                scores["other"] = 2.0
 
         # Softmax normalization with stability clipping
         score_arr = np.array(list(scores.values()), dtype=np.float32)
@@ -161,6 +173,7 @@ class WashHandRuleClassifier:
         norm_probs = exp_scores / max(1e-6, sum_exp)
 
         return {act: float(prob) for act, prob in zip(scores.keys(), norm_probs)}
+
 
     def predict(self, features: Dict[str, Any]) -> Tuple[str, float, str]:
         """
