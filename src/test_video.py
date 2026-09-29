@@ -23,7 +23,7 @@ from src.ui import WashHandHUD
 def evaluate_video(
     video_path: str,
     output_annotated_path: str = None,
-    model_type: str = "hybrid",
+    model_type: str = "rule",
     guide_mode: str = "free",
     step_duration: float = 1.0,
     window_sec: float = 0.5,
@@ -104,15 +104,17 @@ def evaluate_video(
         predictions[res.display_label] += 1
         observed_predictions[res.observed_label] += 1
 
-        # Visualization
+        # Visualization — pass roi_context to draw_hands for correct landmark projection
+        roi_ctx = pipeline.detector._last_roi_context  # corrects ROI landmark to full-frame coords
         if use_right_roi:
             xmin = int(width * 0.42)
             canvas = frame.copy()
             cv2.rectangle(canvas, (xmin, 0), (width, height), (0, 255, 0), 2)
             cv2.putText(canvas, "[ROI Area]", (xmin + 15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            annotated = pipeline.detector.draw_hands(canvas, mediapipe_results)
+            annotated = pipeline.detector.draw_hands(canvas, mediapipe_results, roi_context=roi_ctx)
         else:
-            annotated = pipeline.detector.draw_hands(frame.copy(), mediapipe_results)
+            annotated = pipeline.detector.draw_hands(frame.copy(), mediapipe_results, roi_context=None)
+
 
         hands_status = {
             "left": res.hand_status.get("left") == "observed",
@@ -197,7 +199,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate video with Wash Hand Detector Pipeline")
     parser.add_argument("--video", type=str, default="data/annotated_eval_yt.mp4", help="Path to input video")
     parser.add_argument("--output", type=str, default=None, help="Optional output annotated video path")
-    parser.add_argument("--model-type", type=str, default="hybrid", choices=["hybrid", "ml", "rule"])
+    parser.add_argument("--model-type", type=str, default="rule", choices=["hybrid", "ml", "rule"])
     parser.add_argument("--guide-mode", type=str, default="free", choices=["free", "sequence"])
     parser.add_argument("--step-duration", type=float, default=1.0)
     parser.add_argument("--window-sec", type=float, default=0.5)

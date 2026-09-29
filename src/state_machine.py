@@ -101,8 +101,10 @@ class WashHandStateMachine:
                     self.step_timer = 0.0
                     self.grace_timer = 0.0
 
-                self.step_timer += dt
-                self.step_times[target_step] += dt
+                # Only advance timer with reliable observed evidence (FIX: was counting ghost/held)
+                if is_observed:
+                    self.step_timer += dt
+                    self.step_times[target_step] += dt
                 self.grace_timer = 0.0
 
                 if self.step_timer >= self.step_duration:
