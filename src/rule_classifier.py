@@ -326,6 +326,19 @@ class WashHandRuleClassifier:
                     and interlace_d < 1.05       # 從 0.90 放寬至 1.05（涵蓋更多真實夾的姿勢）
                 )
 
+                # ─── 夾防禦盾 (Clamp Guard) ───
+                # 核心原則：只要手指有真正交錯投影、重疊率高、深入指根，掌面呈面對面相向 (palm_dot <= 0.15)
+                # 且手腕呈 X 交叉 (axis_angle > 18.0) 且非雙掌平貼拇指同側 (not thumbs_same_side)
+                # 即判定有極強「夾」幾何特徵，防止「外」誤奪取判定，同時排除「內」的平行掌心對搓
+                clamp_guard = (
+                    interlace_alts >= 2
+                    and overlap_ratio >= 0.35
+                    and interlace_d < 1.05
+                    and palm_dot <= 0.15
+                    and axis_angle > 18.0
+                    and not thumbs_same_side
+                )
+
                 # ═══ 夾 score ═════════════════════════════════════════════
                 # 原則：close_pairs 只加少量分，真正的交錯才加大分
                 s_jia = 0.0
@@ -337,6 +350,8 @@ class WashHandRuleClassifier:
                     s_jia += 0.5                          # 更多靠近（仍只是「近」）
                 if fingers_truly_interlaced:
                     s_jia += 3.0                          # 手指確實交錯（核心強信號）
+                if clamp_guard:
+                    s_jia += 3.5                          # 滿足夾防禦盾 → 強力增益夾
                 if fingers_truly_interlaced and close_pairs >= 6:
                     s_jia += 1.5                          # 交錯 + 大量接觸 ≈ 真正夾
                 if interlace_alts >= 3 and fingers_truly_interlaced:
@@ -349,17 +364,11 @@ class WashHandRuleClassifier:
                 # 抑制：明確是內（掌心相對 + 無交錯）→ 強力扣分
                 if palm_dot < -0.25 and palm_dist < 1.20 and interlace_alts < 2:
                     s_jia -= 3.0
-                # 抑制：外的信號（低角度 + 拇指異邊）→ X 交叉時不扣（那是夾）
-                if depth_asym > 0.25 and thumbs_opposite_side and axis_angle < 30.0:
-                    s_jia -= 2.5
-                # 抑制：拇指同邊是內的強信號
-                if thumbs_same_side and palm_dot < -0.35:
-                    s_jia -= 2.5
-                # 抑制：非對稱接觸偏強（只在低角度時扣，高角度 X 交叉本來就不對稱）
-                if depth_asym > 0.40 and axis_angle < 30.0:
+                # 抑制：非對稱接觸偏強且無交錯盾 (not clamp_guard) → 掌背覆蓋非夾
+                if depth_asym > 0.40 and axis_angle < 30.0 and not clamp_guard:
                     s_jia -= 1.5
-                # 抑制：運動不對稱 (外) 時非夾
-                if is_asymmetric_rub and axis_angle < 35.0:
+                # 抑制：運動不對稱 (外) 且無交錯盾時非夾
+                if is_asymmetric_rub and not clamp_guard:
                     s_jia -= 2.0
                 # 抑制：拇指主導 → 大
                 if thumb_dist < 0.45:
@@ -369,17 +378,17 @@ class WashHandRuleClassifier:
                     s_jia -= 2.0
 
                 # ═══ 外 score ═════════════════════════════════════════════
-                # 判斷重點：一動一靜運動不對稱 + 一手指尖靠近另一手指根（不對稱）+ 拇指異邊/掌心同向 + 低交叉角度
+                # 判斷重點：一手掌心/指腹覆蓋在另一手手背上，且沒有插入指縫
                 s_wai = 0.0
-                if is_asymmetric_rub:
+                if is_asymmetric_rub and not clamp_guard:
                     s_wai += 2.8                          # 上方手搓動、下方手相對靜止 (外核心動態特徵)
-                if min_one_d < 0.75:
+                if min_one_d < 0.75 and not clamp_guard:
                     s_wai += 1.5                          # 一手指尖靠近另一手指根
-                if min_one_d < 0.55:
+                if min_one_d < 0.55 and not clamp_guard:
                     s_wai += 0.5
-                if depth_asym > 0.25:
-                    s_wai += 1.5                          # 非對稱接觸（外核心特徵）
-                if depth_asym > 0.50:
+                if depth_asym > 0.25 and not clamp_guard:
+                    s_wai += 1.5                          # 非對稱接觸（外核心特徵，但 clamp_guard 時排除）
+                if depth_asym > 0.50 and not clamp_guard:
                     s_wai += 1.0                          # 更強的非對稱
                 # 掌心同向朝向 (一掌面覆蓋一手背)
                 if palm_dot > 0.25:
@@ -387,26 +396,35 @@ class WashHandRuleClassifier:
                         s_wai += 2.5                      # 掌心同向 + 運動不對稱滑動 → 強外
                     else:
                         s_wai += 1.2                      # 僅靜態同向無滑動 → 弱外候選
-                # 拇指異邊：只在低 axis_angle 時給滿分（外＝低角度疊合，夾＝高角度交叉）
+
+                # 拇指異邊：只有在沒有夾防禦盾 (not clamp_guard) 時，才算外的大加分！
+                # 若 clamp_guard 生效，拇指異邊只是十指緊扣時對側拇指外展，對外予以扣分抑制
                 if thumbs_opposite_side:
-                    if axis_angle < 30.0:                 # 低角度 → 確實是外
-                        s_wai += 2.5
-                    elif axis_angle < 45.0:               # 中角度 → 可能是夾或外
-                        s_wai += 1.2
-                    else:                                 # 高角度（X 交叉）→ 更像夾
-                        s_wai += 0.3
-                elif not thumbs_same_side:
+                    if not clamp_guard:
+                        if axis_angle < 30.0:             # 低角度平行覆蓋
+                            s_wai += 2.5
+                        elif axis_angle < 45.0:           # 中角度
+                            s_wai += 1.5
+                        else:
+                            s_wai += 0.5
+                    else:
+                        s_wai -= 3.5                      # 夾交錯盾成立時，拇指異邊不可作為外加分
+                elif not thumbs_same_side and not clamp_guard:
                     s_wai += 0.5
-                if interlace_alts < 2 or overlap_ratio < 0.30:
+
+                if (interlace_alts < 2 or overlap_ratio < 0.30) and not clamp_guard:
                     s_wai += 1.0                          # 手指沒有明顯交錯
+                # 抑制：clamp_guard 觸發時強力扣減外分數
+                if clamp_guard:
+                    s_wai -= 3.5
                 # 抑制：高 axis_angle（X 交叉）→ 傾向夾，不是外
                 if axis_angle > 45.0:
                     s_wai -= 1.5
                 if axis_angle > 60.0:
                     s_wai -= 1.0                          # 更強的 X 交叉
-                # 抑制：手指確實交錯 → 夾，不是外
-                if fingers_truly_interlaced:
-                    s_wai -= 2.5
+                # 抑制：手指確實交錯且掌心面對面 → 夾，不是外
+                if fingers_truly_interlaced and palm_dot < 0.15:
+                    s_wai -= 3.0
                 # 抑制：掌心相對且強 → 不是外
                 if palm_dot < -0.50 and thumbs_same_side:
                     s_wai -= 2.0
@@ -447,9 +465,12 @@ class WashHandRuleClassifier:
                 SCORE_MIN = 2.0
 
                 # 優先判斷：明確內（掌心相對強 + 完全無交錯）
-                clear_inside  = (s_nei >= 5.0 and interlace_alts < 2 and palm_dot < -0.25)
-                # 優先判斷：明確外（拇指異邊強或運動不對稱強 + 完全無交錯）
-                clear_outside = ((s_wai >= 4.5 or (is_asymmetric_rub and s_wai >= 3.5)) and interlace_alts < 2)
+                clear_inside  = (s_nei >= 5.0 and interlace_alts < 2 and palm_dot < -0.25 and not clamp_guard)
+                # 優先判斷：明確外（無夾防禦盾 + (拇指異邊強或運動不對稱強) + 完全無交錯）
+                clear_outside = (
+                    not clamp_guard
+                    and ((s_wai >= 4.5 or (is_asymmetric_rub and s_wai >= 3.5)) and interlace_alts < 2)
+                )
                 # 夾必要條件：一定要有真正交錯的證據
                 # 優先以 fingers_truly_interlaced 判斷；次選：中度交錯（alts + ratio + 足夠配對）
                 jia_qualified = (
