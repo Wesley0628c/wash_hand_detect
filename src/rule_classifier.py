@@ -221,11 +221,12 @@ class WashHandRuleClassifier:
                 if eff_kn_dist < min_t_to_p - 0.05:
                     knuckle_to_palm_score += 0.4
 
-            # 2. 弓手與承接手形態分：彎曲手呈弓形、承接手平掌
+            # 2. 弓手與承接手形態分：彎曲手呈弓形（半握）、承接手平掌
             gong_finger_score = 0.0
-            if min_curl < 140.0:
+            # 放寬至 168°：弓動作是「半握」而非握拳，四指平均角度在 155–168° 之間
+            if min_curl < 168.0:
                 gong_finger_score += 0.8
-            if max_curl > 140.0:
+            if max_curl > 155.0:
                 gong_finger_score += 0.5
             if open_thumb_to_fist > 0.70:  # 伸展手拇指在空中懸空未被包住
                 gong_finger_score += 0.5
@@ -239,9 +240,13 @@ class WashHandRuleClassifier:
                 score_gong = max(0.0, score_gong - 1.5)
 
             # 抑制：雙手平掌對搓 (內) 或平掌貼手背 (外) 時，禁止誤判為弓
-            is_opposing_palms_flat = (palm_dot < -0.35 and min_curl > 125.0 and curl_diff < 22.0)
-            is_dorsum_overlay_flat = (thumb_dist > 0.70 and thumb_dot < -0.10 and min_curl > 125.0 and curl_diff < 22.0)
-            if is_opposing_palms_flat or is_dorsum_overlay_flat or (min_curl > 132.0 and curl_diff < 18.0):
+            # 關鍵：必須加上 eff_kn_dist > 0.88（指節遠離掌心），避免把弓動作的半握手型誤判為平掌
+            knuckles_away = (eff_kn_dist > 0.88)
+            is_opposing_palms_flat = (palm_dot < -0.35 and min_curl > 125.0 and curl_diff < 22.0 and knuckles_away)
+            is_dorsum_overlay_flat = (thumb_dist > 0.70 and thumb_dot < -0.10 and min_curl > 125.0 and curl_diff < 22.0 and knuckles_away)
+            # is_both_flat 同樣需要指節遠離掌心才能觸發，否則弓動作的半握也會被清零
+            is_both_flat = (min_curl > 132.0 and curl_diff < 18.0 and knuckles_away)
+            if is_opposing_palms_flat or is_dorsum_overlay_flat or is_both_flat:
                 score_gong = 0.0
 
             # ─── (C) 計算「立 (Fingertips)」證據分數 ───
